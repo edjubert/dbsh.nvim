@@ -4,8 +4,18 @@ local config = require("psql.config")
 local exec = require("psql.exec")
 local results = require("psql.results")
 local scratch = require("psql.scratch")
+local csv = require("psql.csv")
+local export = require("psql.export")
 
 local M = {}
+
+-- Last query handed to M.query(), reused by the CSV export when the result
+-- buffer is the active one.
+local last_query = nil
+
+function M.last_query()
+	return last_query
+end
 
 function M.query(sql)
 	sql = vim.trim(sql or "")
@@ -14,6 +24,7 @@ function M.query(sql)
 		return
 	end
 
+	last_query = sql
 	results.running(sql)
 	exec.run(sql, {}, function(code, stdout, stderr)
 		local output = stdout
@@ -68,6 +79,92 @@ function M.yank_cell()
 	vim.api.nvim_feedkeys("llv`zy", "n", false)
 end
 
+-- Copies the selected cells of the result table as CSV into the default
+-- register. V takes whole rows, <C-v> takes only the columns of the block.
+function M.yank_csv()
+	local mode = vim.fn.mode()
+	if mode ~= csv.LINEWISE and mode ~= csv.BLOCKWISE then
+		vim.notify(
+			"psql.nvim: select lines with V or a block with <C-v> first",
+			vim.log.levels.WARN
+		)
+		return
+	end
+
+	-- getpos("v") and getpos(".") work during visual mode, unlike the '< '>
+	-- marks, which only get set once visual mode is left.
+	local from = vim.fn.getpos("v")
+	local to = vim.fn.getpos(".")
+	local lines = vim.api.nvim_buf_get_lines(
+		0,
+		math.min(from[2], to[2]) - 1,
+		math.max(from[2], to[2]),
+		false
+	)
+
+	local rows = csv.rows_from_lines(
+		lines,
+		mode,
+		math.min(from[3], to[3]),
+		math.max(from[3], to[3])
+	)
+	if #rows == 0 then
+		vim.notify("psql.nvim: no table cell in the selection", vim.log.levels.WARN)
+		return
+	end
+
+	vim.fn.setreg('"', csv.to_csv(rows, config.options().csv_delimiter))
+	vim.notify(string.format("psql.nvim: yanked %d row(s) as CSV", #rows))
+end
+
+-- The result buffer exports the query it is showing; any other buffer
+-- exports the SQL paragraph under the cursor.
+local function query_to_export()
+	local name = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ":t")
+	if name == "__SQL__" then
+		return M.last_query()
+	end
+
+	local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+	local lnum = vim.api.nvim_win_get_cursor(0)[1]
+	local start, stop = M.paragraph_range(lines, lnum)
+	return table.concat(vim.list_slice(lines, start, stop), "\n")
+end
+
+function M.export_csv()
+	local sql = vim.trim(query_to_export() or "")
+	if sql == "" then
+		vim.notify("psql.nvim: nothing to export", vim.log.levels.WARN)
+		return
+	end
+
+	local dir = config.options().export_dir
+	vim.fn.mkdir(dir, "p")
+	local suggestion = export.default_path(
+		dir,
+		config.current_name() or "scratchpad",
+		os.date("%Y%m%d")
+	)
+
+	vim.ui.input(
+		{ prompt = "Export to: ", default = suggestion, completion = "file" },
+		function(choice)
+			if choice == nil or vim.trim(choice) == "" then
+				return
+			end
+			-- The suggestion may have been edited onto an existing file.
+			local path = export.free_path(vim.trim(choice))
+			export.run(sql, path, function(written, err)
+				if err ~= nil then
+					vim.notify("psql.nvim: " .. err, vim.log.levels.ERROR)
+					return
+				end
+				vim.notify("psql.nvim: exported to " .. written)
+			end)
+		end
+	)
+end
+
 local function pickers()
 	-- Deferred require: psql.telescope.pickers requires this module back.
 	return require("psql.telescope.pickers")
@@ -83,6 +180,7 @@ local function declare_commands()
 
 	command("PSQLTemp", function() scratch.open() end, {})
 	command("PSQLCancel", function() exec.cancel("user") end, {})
+	command("PSQLExportCSV", function() M.export_csv() end, {})
 
 	command("PSQLInfo", function()
 		local name = config.current_name()

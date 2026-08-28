@@ -4,6 +4,7 @@ local eq, expect_match = helpers.eq, helpers.expect_match
 local psql = require("psql")
 local exec = require("psql.exec")
 local results = require("psql.results")
+local csv = require("psql.csv")
 
 local original_runner
 
@@ -113,6 +114,54 @@ T["renders stderr when psql fails"] = function()
 
 	local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, true)
 	eq(vim.tbl_contains(lines, "connection refused"), true)
+end
+
+T["remembers the last executed query"] = function()
+	exec.runner = function(_, _, on_exit)
+		vim.schedule(function()
+			on_exit({ code = 0, stdout = "one", stderr = "" })
+		end)
+		return { kill = function() end }
+	end
+
+	psql.query("SELECT 42;")
+	vim.wait(1000, function() return psql.last_query() ~= nil end)
+	eq(psql.last_query(), "SELECT 42;")
+end
+
+T["does not remember an empty query"] = function()
+	local before = psql.last_query()
+	local original_notify = vim.notify
+	vim.notify = function() end
+	psql.query("   ")
+	vim.notify = original_notify
+	eq(psql.last_query(), before)
+end
+
+T["refuses to yank csv outside a supported visual mode"] = function()
+	local notified
+	local original_notify = vim.notify
+	vim.notify = function(msg) notified = msg end
+	psql.yank_csv()
+	vim.notify = original_notify
+	expect_match(notified, "V")
+end
+
+T["serializes a rendered table into the default register"] = function()
+	-- The rendering psql produces with linestyle unicode and border 2.
+	local lines = {
+		"┌────┬───────┐",
+		"│ id │ name  │",
+		"├────┼───────┤",
+		"│  1 │ alice │",
+		"└────┴───────┘",
+	}
+	local rows = csv.rows_from_lines(lines, csv.LINEWISE)
+	eq(csv.to_csv(rows, ","), "id,name\n1,alice")
+end
+
+T["declares the export command"] = function()
+	eq(vim.fn.exists(":PSQLExportCSV"), 2)
 end
 
 return T
