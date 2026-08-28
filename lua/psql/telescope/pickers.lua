@@ -73,6 +73,19 @@ local function plain_entry(value)
 	return { value = value, display = value, ordinal = value }
 end
 
+-- Binds <CR> explicitly in both modes instead of replacing select_default:
+-- a user config that remaps <CR> to another action (e.g. select_tab_drop)
+-- would otherwise silently bypass a select_default override.
+local function bind_enter(t, bufnr, map, handler)
+	local select = function()
+		local entry = t.state.get_selected_entry()
+		t.actions.close(bufnr)
+		handler(entry)
+	end
+	map("i", "<CR>", select)
+	map("n", "<CR>", select)
+end
+
 function M.connections()
 	local t = require_telescope()
 	if t == nil then
@@ -83,10 +96,8 @@ function M.connections()
 		title = "PSQL connections",
 		results = config.names(),
 		entry_maker = plain_entry,
-		attach_mappings = function(bufnr)
-			t.actions.select_default:replace(function()
-				local entry = t.state.get_selected_entry()
-				t.actions.close(bufnr)
+		attach_mappings = function(bufnr, map)
+			bind_enter(t, bufnr, map, function(entry)
 				local _, err = config.set_connection(entry.value)
 				if err ~= nil then
 					notify_error(err)
@@ -114,10 +125,8 @@ function M.databases()
 			title = "PSQL databases",
 			results = names,
 			entry_maker = plain_entry,
-			attach_mappings = function(bufnr)
-				t.actions.select_default:replace(function()
-					local entry = t.state.get_selected_entry()
-					t.actions.close(bufnr)
+			attach_mappings = function(bufnr, map)
+				bind_enter(t, bufnr, map, function(entry)
 					local _, set_err = config.set_database(entry.value)
 					if set_err ~= nil then
 						notify_error(set_err)
@@ -146,10 +155,8 @@ function M.schemas()
 			title = "PSQL schemas",
 			results = names,
 			entry_maker = plain_entry,
-			attach_mappings = function(bufnr)
-				t.actions.select_default:replace(function()
-					local entry = t.state.get_selected_entry()
-					t.actions.close(bufnr)
+			attach_mappings = function(bufnr, map)
+				bind_enter(t, bufnr, map, function(entry)
 					M.tables({ schema = entry.value })
 				end)
 				return true
@@ -176,9 +183,7 @@ function M.tables(opts)
 			results = rows,
 			entry_maker = M.format_table_entry,
 			attach_mappings = function(bufnr, map)
-				t.actions.select_default:replace(function()
-					local entry = t.state.get_selected_entry()
-					t.actions.close(bufnr)
+				bind_enter(t, bufnr, map, function(entry)
 					local sql = introspect.preview_query(entry.value.schema, entry.value.name)
 					-- Deferred require: psql.init imports this module.
 					require("psql").query(sql)
