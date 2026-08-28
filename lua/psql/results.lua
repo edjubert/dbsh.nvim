@@ -46,6 +46,9 @@ function M.open()
 		vim.api.nvim_win_set_buf(win, buf)
 	end
 
+	-- Rendered by the plugin only: hand editing would desync it from psql.
+	vim.bo[buf].modifiable = false
+
 	-- Wide result tables must scroll horizontally instead of soft-wrapping.
 	vim.wo[win].wrap = false
 	vim.wo[win].sidescrolloff = 0
@@ -54,7 +57,11 @@ function M.open()
 end
 
 local function set_lines(buf, lines)
+	-- nvim_buf_set_lines refuses a non-modifiable buffer, so lift the
+	-- protection for the write and put it straight back.
+	vim.bo[buf].modifiable = true
 	vim.api.nvim_buf_set_lines(buf, 0, -1, true, lines)
+	vim.bo[buf].modifiable = false
 end
 
 function M.running(query)

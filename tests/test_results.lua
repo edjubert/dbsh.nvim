@@ -54,4 +54,15 @@ T["replaces previous content on the next render"] = function()
 	eq(lines, { "SELECT 2;", "", "two" })
 end
 
+T["makes the result buffer read only"] = function()
+	local buf = results.open()
+	eq(vim.bo[buf].modifiable, false)
+end
+
+T["still renders into the read only buffer"] = function()
+	local buf = results.render("SELECT 1;", "one")
+	eq(vim.api.nvim_buf_get_lines(buf, 0, -1, true), { "SELECT 1;", "", "one" })
+	eq(vim.bo[buf].modifiable, false)
+end
+
 return T
