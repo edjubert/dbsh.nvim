@@ -1,116 +1,149 @@
 # psql.nvim
 
-This plugin let's you run PSQL commands directly from within Neovim. The core querying logic of this plugin is forked from <a
-href="https://github.com/mzarnitsa/psql">this</a> repository. The credit is theirs.
+Run PostgreSQL queries from Neovim, browse your schema with Telescope, and never
+block the editor while a query runs.
 
-[![asciicast](https://asciinema.org/a/rGoBtjHnOvwBgVm5zcwavFJBz.svg)](https://asciinema.org/a/rGoBtjHnOvwBgVm5zcwavFJBz)
+Fork of [harrisoncramer/psql](https://github.com/harrisoncramer/psql), itself
+forked from [mzarnitsa/psql](https://github.com/mzarnitsa/psql).
 
-This repository is different from theirs because it:
-- Allows for connections to different databases, including with sensitive passwords
-- Reuses the same buffer every time, providing query/results history in the buffer
+## What this fork changes
+
+- **Asynchronous execution.** Queries run through `vim.system`; the editor stays
+  usable, and a query can be cancelled with `:PSQLCancel`.
+- **`~/.pgpass` authentication.** No password, no hash, no `PGPASSWORD` in the
+  process list.
+- **Telescope pickers** for connections, databases, schemas and tables.
+- **Persistent scratchpad**, one SQL file per connection.
+- All modules live under `lua/psql/` instead of polluting the global Lua namespace.
 
 ## Requirements
 
-- Neovim 0.7+
-- psql
+- Neovim 0.10+
+- `psql`
+- [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim) (optional, for
+  the pickers)
 
 ## Installation
 
-Install with your favorite plugin manager, like Packer:
-
-```
-  use('harrisoncramer/psql')
-```
-
-Then, call the setup function, optionally passing in a settings table:
+With lazy.nvim:
 
 ```lua
-  psql.setup({})
-```
-
-## Features
-
-This package does not create any key bindings out of the box.
-
-The `psql` module exposes three functions. You can query PostgreSQL for the the current line, with the current paragraph, or with the
-current visual selection. In the results buffer after evaluating a query, you can also yank the contents of the cell under the cursor. These are the mappings that I've created for myself.
-
-```lua
-  local map_opts = { noremap = true, silent = true, nowait = true }
-  vim.keymap.set("n", "<localleader>r", psql.query_paragraph, map_opts) -- Queries using the current paragraph
-  vim.keymap.set("n", "<localleader>e", psql.query_current_line, map_opts) -- Queries using the current line
-  vim.keymap.set("v", "<localleader>e", psql.query_selection, map_opts) -- Queries using the visual selection
-  vim.keymap.set("n", "<localleader>y", psql.yank_cell, map_opts) -- In the results buffer, yanks the current cell
+{
+	"edjubert/psql.nvim",
+	dependencies = {
+		"nvim-telescope/telescope.nvim",
+	},
+	config = function()
+		require("psql").setup({
+			connections = {
+				local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
+				staging = { host = "db.example.com", port = 5432, database = "app", username = "readonly" },
+			},
+			default = "local_db",
+		})
+	end,
+}
 ```
 
 ## Configuration
 
-By default this plugin will attempt to connect to a PSQL database running on
-your localhost. To run commands to a different database, call the `:PSQL` command and supply the
-module connection name:
+```lua
+require("psql").setup({
+	connections = {
+		local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
+	},
+	default = "local_db",   -- connection selected at startup
+	connect_timeout = 5,    -- PGCONNECT_TIMEOUT, in seconds
+	query_timeout = 30000,  -- kills a runaway query, in milliseconds
+	preview_limit = 10,     -- LIMIT used by the table picker
+})
+```
+
+A connection has exactly four fields: `host`, `port`, `database`, `username`.
+There is no `password` field.
+
+## Authentication
+
+Passwords are resolved by `psql` itself through `~/.pgpass`. The plugin always
+invokes `psql -w`, so it never prompts and never leaks a password into the
+process list.
 
 ```
-:PSQL dev
+# ~/.pgpass
+hostname:port:database:username:password
+db.example.com:5432:*:readonly:secret
 ```
 
-This command will look for a file at `~/.config/nvim/lua/psql/dev.lua` and
-will source it, hereafter referred to as the `settings` module. Subsequent commands will run against this database.
+The file **must** be `chmod 600`:
 
-The default connection module looks like this:
+```bash
+chmod 600 ~/.pgpass
+```
+
+PostgreSQL silently ignores a `.pgpass` with looser permissions, which shows up
+as an unexpected password prompt.
+
+## Commands
+
+| Command | Description |
+|---|---|
+| `:PSQLConnections` | pick a connection |
+| `:PSQLDatabases` | pick a database on the current server |
+| `:PSQLSchemas` | pick a schema, then one of its tables |
+| `:PSQLTables` | pick any table, as a flat `schema.table` list |
+| `:PSQLTemp` | open the scratchpad of the current connection |
+| `:PSQLCancel` | cancel the running query |
+| `:PSQLInfo` | show the current connection and database |
+
+In the table picker opened from `:PSQLSchemas`, `<BS>` goes back to the schema
+list. It is bound in **normal mode only**, so that backspace still edits the
+Telescope prompt.
+
+Selecting a table runs `SELECT * FROM "schema"."table" LIMIT 10;`.
+
+## Keymaps
+
+This plugin defines no keymaps. These are a reasonable starting point:
 
 ```lua
-return {
-  connection = {
-    database = "postgres",
-    host = "localhost",
-    port = 5432,
-    password = "postgres", -- See "Passwords"
-    username = "postgres",
-  },
-  hash_algorithm = "sha256",
-}
+local psql = require("psql")
+local opts = { noremap = true, silent = true, nowait = true }
+
+vim.keymap.set("n", "<localleader>r", psql.query_paragraph, opts)
+vim.keymap.set("n", "<localleader>e", psql.query_current_line, opts)
+vim.keymap.set("v", "<localleader>e", psql.query_selection, opts)
+vim.keymap.set("n", "<localleader>y", psql.yank_cell, opts)
 ```
 
-For instance, to create to a "production" connection with a password of "108nduiDAF":
+## Results buffer
 
-```shell
-$ printf 108nduiDAF | sha256sum
-  db9e46ee0771d27852602bc0a441eea0458c00fd6eca29b59a2d68c085fe8823
+Results are written to a reused `__SQL__` buffer, which keeps the history of
+previous queries. Wrapping is disabled so that wide tables scroll horizontally
+(`zl` / `zh`, or `zL` / `zH` for larger jumps) instead of folding into
+unreadable blocks.
 
-cat <<EOF >>~/.config/nvim/psql/lua/production.lua
-return {
-  connection = {
-    database = "production",
-    host = "https://super.secret.host",
-    port = 5432,
-    password = "db9e46ee0771d27852602bc0a441eea0458c00fd6eca29b59a2d68c085fe8823",
-    username = "harrison",
-  },
-  hash_algorithm = "sha256",
-}
-EOF
+## Scratchpad
+
+`:PSQLTemp` opens `<stdpath("data")>/psql/<connection>.sql`, a real file on disk.
+Each connection gets its own scratchpad, so your working queries follow the
+database you are working on across sessions.
+
+## Migrating from the upstream plugin
+
+1. Replace `harrisoncramer/psql` with `edjubert/psql.nvim` in your plugin spec.
+2. Delete your `~/.config/nvim/lua/psql/<name>.lua` files and move their
+   `host` / `port` / `database` / `username` fields into `connections`. Drop
+   `password` and `hash_algorithm`.
+3. Make sure `~/.pgpass` exists, is `chmod 600`, and has a line for every
+   connection you declared.
+4. `:PSQL <name>` is gone; use `:PSQLConnections`.
+
+## Development
+
+```bash
+make test
 ```
 
-Then source the module inside Neovim.
-
-```
-:PSQL production
-```
-
-## Passwords
-
-If you do not supply a password in your configuration module `psql.nvim` will
-attempt to use "postgres" as the password. To add your own password,
-hash the string, and supply the hashed version to `settings.connection.password` and the
-hashing algorithm used to `settings.hash_algorithm`. The supported hashing algorithms are:
-
-- sha224
-- sha256
-- sha384
-- sha512
-- sha512_224
-- sha512_256
-
-When connecting to a database that requires a password, the hashed version of
-your input will be compared against the hashed password contained in your
-configuration module.
+Tests use [mini.test](https://github.com/nvim-mini/mini.test). Set `MINI_TEST_DIR`
+if it is not in one of the standard locations; otherwise it is cloned automatically
+into `deps/`.
