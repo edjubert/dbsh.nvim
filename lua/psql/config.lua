@@ -10,6 +10,9 @@ local defaults = {
 	connect_timeout = 5,
 	query_timeout = 30000,
 	preview_limit = 10,
+	-- Column separator used both by the CSV yank and by the file export.
+	csv_delimiter = ",",
+	export_dir = vim.fs.joinpath(vim.fn.stdpath("data"), "psql", "exports"),
 }
 
 M.state = {
