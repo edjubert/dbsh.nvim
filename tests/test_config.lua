@@ -86,4 +86,13 @@ T["lets the user request a vertical result split"] = function()
 	eq(config.options().results_split, "vertical")
 end
 
+T["defaults to no variable pattern"] = function()
+	eq(config.options().variable_patterns, {})
+end
+
+T["lets the user declare variable patterns"] = function()
+	config.setup({ connections = {}, variable_patterns = { ":(raw_data)" } })
+	eq(config.options().variable_patterns, { ":(raw_data)" })
+end
+
 return T

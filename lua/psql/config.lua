@@ -15,6 +15,9 @@ local defaults = {
 	export_dir = vim.fs.joinpath(vim.fn.stdpath("data"), "psql", "exports"),
 	-- "horizontal" or "vertical": which split opens the result buffer in.
 	results_split = "horizontal",
+	-- Lua patterns, each with a single capture giving the variable name.
+	-- Empty by default: no SQL file changes behaviour unless asked.
+	variable_patterns = {},
 }
 
 M.state = {
