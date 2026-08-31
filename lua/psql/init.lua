@@ -25,13 +25,14 @@ function M.query(sql)
 	end
 
 	last_query = sql
-	results.running(sql)
+	local split_opts = { split = config.options().results_split }
+	results.running(sql, split_opts)
 	exec.run(sql, {}, function(code, stdout, stderr)
 		local output = stdout
 		if code ~= 0 then
 			output = stderr ~= "" and stderr or stdout
 		end
-		results.render(sql, output)
+		results.render(sql, output, split_opts)
 	end)
 end
 

@@ -77,4 +77,13 @@ T["lets the user override the csv delimiter"] = function()
 	eq(config.options().csv_delimiter, ";")
 end
 
+T["defaults the result split to horizontal"] = function()
+	eq(config.options().results_split, "horizontal")
+end
+
+T["lets the user request a vertical result split"] = function()
+	config.setup({ connections = {}, results_split = "vertical" })
+	eq(config.options().results_split, "vertical")
+end
+
 return T

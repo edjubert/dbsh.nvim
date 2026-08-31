@@ -28,7 +28,10 @@ function M.find_win(buf)
 	return nil
 end
 
-function M.open()
+-- opts: { split = "horizontal"|"vertical"? }. Only read the first time a
+-- window is created for this buffer: once open, the existing window is
+-- reused regardless of what a later call asks for.
+function M.open(opts)
 	local buf = M.find_buf()
 	if buf == nil then
 		buf = vim.api.nvim_create_buf(false, true)
@@ -41,7 +44,8 @@ function M.open()
 
 	local win = M.find_win(buf)
 	if win == nil then
-		vim.cmd("split")
+		local split = (opts or {}).split
+		vim.cmd(split == "vertical" and "vsplit" or "split")
 		win = vim.api.nvim_get_current_win()
 		vim.api.nvim_win_set_buf(win, buf)
 	end
@@ -70,8 +74,8 @@ local function split_lines(text)
 	return vim.split(text or "", "\n", { plain = true })
 end
 
-function M.running(query)
-	local buf = M.open()
+function M.running(query, opts)
+	local buf = M.open(opts)
 	local lines = { "# Running..." }
 	vim.list_extend(lines, split_lines(query))
 	table.insert(lines, "")
@@ -80,8 +84,8 @@ function M.running(query)
 	return buf
 end
 
-function M.render(query, output)
-	local buf = M.open()
+function M.render(query, output, opts)
+	local buf = M.open(opts)
 	local lines = split_lines(query)
 	table.insert(lines, "")
 	vim.list_extend(lines, split_lines(output))

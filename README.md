@@ -157,6 +157,7 @@ require("psql").setup({
 	preview_limit = 10,
 	csv_delimiter = ",",
 	export_dir = vim.fs.joinpath(vim.fn.stdpath("data"), "psql", "exports"),
+	results_split = "horizontal",
 })
 ```
 
@@ -169,6 +170,7 @@ require("psql").setup({
 | `preview_limit` | `10` | `LIMIT` used when previewing a table from the picker. |
 | `csv_delimiter` | `","` | Column separator, for both CSV export and CSV yank. |
 | `export_dir` | `<stdpath("data")>/psql/exports` | Where `:PSQLExportCSV` suggests writing. |
+| `results_split` | `"horizontal"` | `"horizontal"` or `"vertical"`: which split opens `__SQL__` in. Only applies the first time the window is created; combine with `vim.opt.splitright = true` for a right-hand split. |
 
 There is deliberately **no** `password` field.
 
