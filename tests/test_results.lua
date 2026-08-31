@@ -65,4 +65,16 @@ T["still renders into the read only buffer"] = function()
 	eq(vim.bo[buf].modifiable, false)
 end
 
+T["renders a multi line query"] = function()
+	local buf = results.render("SELECT a\nFROM t;", "one")
+	local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, true)
+	eq(lines, { "SELECT a", "FROM t;", "", "one" })
+end
+
+T["shows a running placeholder for a multi line query"] = function()
+	local buf = results.running("SELECT a\nFROM t;")
+	local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, true)
+	eq(lines, { "# Running...", "SELECT a", "FROM t;", "" })
+end
+
 return T

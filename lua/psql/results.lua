@@ -64,17 +64,27 @@ local function set_lines(buf, lines)
 	vim.bo[buf].modifiable = false
 end
 
+-- nvim_buf_set_lines rejects an item holding a newline, so a multi-line
+-- query has to be spread over as many entries as it has lines.
+local function split_lines(text)
+	return vim.split(text or "", "\n", { plain = true })
+end
+
 function M.running(query)
 	local buf = M.open()
-	set_lines(buf, { "# Running...", query, "" })
+	local lines = { "# Running..." }
+	vim.list_extend(lines, split_lines(query))
+	table.insert(lines, "")
+	set_lines(buf, lines)
 	vim.cmd("redraw")
 	return buf
 end
 
 function M.render(query, output)
 	local buf = M.open()
-	local lines = { query, "" }
-	vim.list_extend(lines, vim.split(output or "", "\n", { plain = true }))
+	local lines = split_lines(query)
+	table.insert(lines, "")
+	vim.list_extend(lines, split_lines(output))
 	set_lines(buf, lines)
 	return buf
 end
