@@ -64,4 +64,26 @@ T["reports an error when switching database with no connection"] = function()
 	expect_match(err, "no current connection")
 end
 
+T["applies csv export defaults"] = function()
+	eq(config.options().csv_delimiter, ",")
+	eq(
+		config.options().export_dir,
+		vim.fs.joinpath(vim.fn.stdpath("data"), "psql", "exports")
+	)
+end
+
+T["lets the user override the csv delimiter"] = function()
+	config.setup({ connections = {}, csv_delimiter = ";" })
+	eq(config.options().csv_delimiter, ";")
+end
+
+T["defaults the result split to horizontal"] = function()
+	eq(config.options().results_split, "horizontal")
+end
+
+T["lets the user request a vertical result split"] = function()
+	config.setup({ connections = {}, results_split = "vertical" })
+	eq(config.options().results_split, "vertical")
+end
+
 return T

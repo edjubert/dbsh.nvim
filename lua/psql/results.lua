@@ -28,7 +28,10 @@ function M.find_win(buf)
 	return nil
 end
 
-function M.open()
+-- opts: { split = "horizontal"|"vertical"? }. Only read the first time a
+-- window is created for this buffer: once open, the existing window is
+-- reused regardless of what a later call asks for.
+function M.open(opts)
 	local buf = M.find_buf()
 	if buf == nil then
 		buf = vim.api.nvim_create_buf(false, true)
@@ -41,10 +44,14 @@ function M.open()
 
 	local win = M.find_win(buf)
 	if win == nil then
-		vim.cmd("split")
+		local split = (opts or {}).split
+		vim.cmd(split == "vertical" and "vsplit" or "split")
 		win = vim.api.nvim_get_current_win()
 		vim.api.nvim_win_set_buf(win, buf)
 	end
+
+	-- Rendered by the plugin only: hand editing would desync it from psql.
+	vim.bo[buf].modifiable = false
 
 	-- Wide result tables must scroll horizontally instead of soft-wrapping.
 	vim.wo[win].wrap = false
@@ -54,20 +61,34 @@ function M.open()
 end
 
 local function set_lines(buf, lines)
+	-- nvim_buf_set_lines refuses a non-modifiable buffer, so lift the
+	-- protection for the write and put it straight back.
+	vim.bo[buf].modifiable = true
 	vim.api.nvim_buf_set_lines(buf, 0, -1, true, lines)
+	vim.bo[buf].modifiable = false
 end
 
-function M.running(query)
-	local buf = M.open()
-	set_lines(buf, { "# Running...", query, "" })
+-- nvim_buf_set_lines rejects an item holding a newline, so a multi-line
+-- query has to be spread over as many entries as it has lines.
+local function split_lines(text)
+	return vim.split(text or "", "\n", { plain = true })
+end
+
+function M.running(query, opts)
+	local buf = M.open(opts)
+	local lines = { "# Running..." }
+	vim.list_extend(lines, split_lines(query))
+	table.insert(lines, "")
+	set_lines(buf, lines)
 	vim.cmd("redraw")
 	return buf
 end
 
-function M.render(query, output)
-	local buf = M.open()
-	local lines = { query, "" }
-	vim.list_extend(lines, vim.split(output or "", "\n", { plain = true }))
+function M.render(query, output, opts)
+	local buf = M.open(opts)
+	local lines = split_lines(query)
+	table.insert(lines, "")
+	vim.list_extend(lines, split_lines(output))
 	set_lines(buf, lines)
 	return buf
 end

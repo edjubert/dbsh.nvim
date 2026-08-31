@@ -4,6 +4,7 @@ local eq, expect_match = helpers.eq, helpers.expect_match
 local psql = require("psql")
 local exec = require("psql.exec")
 local results = require("psql.results")
+local csv = require("psql.csv")
 
 local original_runner
 
@@ -113,6 +114,104 @@ T["renders stderr when psql fails"] = function()
 
 	local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, true)
 	eq(vim.tbl_contains(lines, "connection refused"), true)
+end
+
+T["remembers the last executed query"] = function()
+	exec.runner = function(_, _, on_exit)
+		vim.schedule(function()
+			on_exit({ code = 0, stdout = "one", stderr = "" })
+		end)
+		return { kill = function() end }
+	end
+
+	psql.query("SELECT 42;")
+	vim.wait(1000, function() return psql.last_query() ~= nil end)
+	eq(psql.last_query(), "SELECT 42;")
+end
+
+T["does not remember an empty query"] = function()
+	local before = psql.last_query()
+	local original_notify = vim.notify
+	vim.notify = function() end
+	psql.query("   ")
+	vim.notify = original_notify
+	eq(psql.last_query(), before)
+end
+
+T["refuses to yank csv outside a supported visual mode"] = function()
+	local notified
+	local original_notify = vim.notify
+	vim.notify = function(msg) notified = msg end
+	psql.yank_csv()
+	vim.notify = original_notify
+	expect_match(notified, "V")
+end
+
+T["serializes a rendered table into the default register"] = function()
+	-- The rendering psql produces with linestyle unicode and border 2.
+	local lines = {
+		"┌────┬───────┐",
+		"│ id │ name  │",
+		"├────┼───────┤",
+		"│  1 │ alice │",
+		"└────┴───────┘",
+	}
+	local rows = csv.rows_from_lines(lines, csv.LINEWISE)
+	eq(csv.to_csv(rows, ","), "id,name\n1,alice")
+end
+
+T["declares the export command"] = function()
+	eq(vim.fn.exists(":PSQLExportCSV"), 2)
+end
+
+T["yanks to the unnamed register by default"] = function()
+	eq(psql.yank_registers(""), { '"' })
+end
+
+T["also yanks to + when clipboard is unnamedplus"] = function()
+	eq(psql.yank_registers("unnamedplus"), { '"', "+" })
+end
+
+T["also yanks to * when clipboard is unnamed"] = function()
+	eq(psql.yank_registers("unnamed"), { '"', "*" })
+end
+
+T["honours both clipboard flags at once"] = function()
+	eq(psql.yank_registers("unnamed,unnamedplus"), { '"', "*", "+" })
+end
+
+T["accepts a range on the export command"] = function()
+	-- Typing : in visual mode prefills '<,'>, which raises E481 on a
+	-- command declared without a range.
+	eq(vim.api.nvim_get_commands({})["PSQLExportCSV"].range, ".")
+end
+
+T["exports the given range rather than the paragraph"] = function()
+	local export = require("psql.export")
+	local original_run, original_input = export.run, vim.ui.input
+	local captured
+
+	export.run = function(sql, path, cb)
+		captured = sql
+		cb(path, nil)
+	end
+	vim.ui.input = function(_, cb) cb("/tmp/psql-range-test.csv") end
+	local original_notify = vim.notify
+	vim.notify = function() end
+
+	-- One paragraph, no blank line: without a range the whole block is taken.
+	vim.api.nvim_buf_set_lines(0, 0, -1, false, {
+		"TRUNCATE t;",
+		"SELECT a",
+		"FROM t;",
+	})
+	psql.export_csv({ range = 2, line1 = 2, line2 = 3 })
+
+	vim.notify = original_notify
+	vim.ui.input = original_input
+	export.run = original_run
+
+	eq(captured, "SELECT a\nFROM t;")
 end
 
 return T
