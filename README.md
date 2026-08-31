@@ -290,14 +290,17 @@ exactly where you expect the table.
 ## Pickers
 
 <!--
-SCREENSHOT docs/media/picker-schemas.png
-Shows: the drill-down.
-Setup: side-by-side or stacked composite of two frames. Frame 1, :PSQLSchemas
-  with a schema highlighted. Frame 2, the table picker that opens after selecting
-  it, titled "PSQL tables - <schema>". Add a caption or arrow between them.
-Framing: crop tightly to the two Telescope windows.
+SCREENSHOT docs/media/picker-schemas_1.png + docs/media/picker-schemas_2.png
+Shows: the drill-down. Frame 1, :PSQLSchemas with a schema highlighted.
+  Frame 2, the table picker that opens after selecting it, titled
+  "PSQL tables - <schema>".
 -->
-![Schema drill-down](docs/media/picker-schemas.png)
+<table>
+<tr>
+<td width="50%"><img src="docs/media/picker-schemas_1.png" alt="PSQLSchemas, a schema highlighted"></td>
+<td width="50%"><img src="docs/media/picker-schemas_2.png" alt="Tables of the selected schema"></td>
+</tr>
+</table>
 
 - **`:PSQLConnections`** — switch between the connections you declared.
 - **`:PSQLDatabases`** — every database on the current server. Selecting one keeps

@@ -1,3 +1,4 @@
 plugin
 .sessions
 deps/
+.DS_Store
