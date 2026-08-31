@@ -149,11 +149,24 @@ local psql = require("psql")
 local opts = { noremap = true, silent = true, nowait = true }
 
 vim.keymap.set("n", "<localleader>r", psql.query_paragraph, opts)
+vim.keymap.set("v", "<localleader>r", psql.query_selection, opts)
 vim.keymap.set("n", "<localleader>e", psql.query_current_line, opts)
 vim.keymap.set("v", "<localleader>e", psql.query_selection, opts)
 vim.keymap.set("n", "<localleader>y", psql.yank_cell, opts)
 vim.keymap.set("v", "<localleader>y", psql.yank_csv, opts)
 ```
+
+Bind every key in **both** normal and visual mode, even when one of the two is
+redundant. An unmapped `<localleader>` prefix falls through in visual mode, and
+the next key is then read as a plain Vim command: with `<localleader>r` left
+unmapped, pressing it over a selection runs `r`, which silently replaces every
+selected character. Mapping it to `query_selection` closes that trap.
+
+| | normal mode | visual mode |
+|---|---|---|
+| `<localleader>r` | run the paragraph | run the selection |
+| `<localleader>e` | run the current line | run the selection |
+| `<localleader>y` | yank the cell under the cursor | yank the selection as CSV |
 
 ## Running queries
 
