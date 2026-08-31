@@ -164,6 +164,22 @@ T["declares the export command"] = function()
 	eq(vim.fn.exists(":PSQLExportCSV"), 2)
 end
 
+T["yanks to the unnamed register by default"] = function()
+	eq(psql.yank_registers(""), { '"' })
+end
+
+T["also yanks to + when clipboard is unnamedplus"] = function()
+	eq(psql.yank_registers("unnamedplus"), { '"', "+" })
+end
+
+T["also yanks to * when clipboard is unnamed"] = function()
+	eq(psql.yank_registers("unnamed"), { '"', "*" })
+end
+
+T["honours both clipboard flags at once"] = function()
+	eq(psql.yank_registers("unnamed,unnamedplus"), { '"', "*", "+" })
+end
+
 T["accepts a range on the export command"] = function()
 	-- Typing : in visual mode prefills '<,'>, which raises E481 on a
 	-- command declared without a range.

@@ -79,8 +79,24 @@ function M.yank_cell()
 	vim.api.nvim_feedkeys("llv`zy", "n", false)
 end
 
+-- Registers a yank has to land in for 'clipboard' to be honoured. Writing
+-- to the unnamed register alone is not enough: under unnamedplus every put
+-- reads from +, which setreg('"') leaves untouched.
+function M.yank_registers(clipboard)
+	local names = { '"' }
+	for _, item in ipairs(vim.split(clipboard or "", ",", { plain = true })) do
+		if item == "unnamedplus" then
+			table.insert(names, "+")
+		elseif item == "unnamed" then
+			table.insert(names, "*")
+		end
+	end
+	return names
+end
+
 -- Copies the selected cells of the result table as CSV into the default
--- register. V takes whole rows, <C-v> takes only the columns of the block.
+-- register, and into the clipboard registers 'clipboard' asks for.
+-- V takes whole rows, <C-v> takes only the columns of the block.
 function M.yank_csv()
 	local mode = vim.fn.mode()
 	if mode ~= csv.LINEWISE and mode ~= csv.BLOCKWISE then
@@ -113,7 +129,10 @@ function M.yank_csv()
 		return
 	end
 
-	vim.fn.setreg('"', csv.to_csv(rows, config.options().csv_delimiter))
+	local text = csv.to_csv(rows, config.options().csv_delimiter)
+	for _, name in ipairs(M.yank_registers(vim.o.clipboard)) do
+		vim.fn.setreg(name, text)
+	end
 	vim.notify(string.format("psql.nvim: yanked %d row(s) as CSV", #rows))
 end
 

@@ -241,8 +241,10 @@ Border and separator lines are ignored, so a selection that overshoots the table
 frame still yields clean CSV. The header row, if selected, is copied like any
 other row.
 
-The text goes to the **default register**. Add `vim.opt.clipboard =
-"unnamedplus"` to your config if you want it in the system clipboard too.
+The text goes to the **default register**, and to the clipboard registers your
+`'clipboard'` option asks for — `+` under `unnamedplus`, `*` under `unnamed`.
+Setting `vim.opt.clipboard = "unnamedplus"` is therefore enough to paste the CSV
+outside Neovim.
 
 For a single cell without selecting anything, `psql.yank_cell()` grabs the cell
 under the cursor.
