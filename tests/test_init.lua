@@ -164,4 +164,38 @@ T["declares the export command"] = function()
 	eq(vim.fn.exists(":PSQLExportCSV"), 2)
 end
 
+T["accepts a range on the export command"] = function()
+	-- Typing : in visual mode prefills '<,'>, which raises E481 on a
+	-- command declared without a range.
+	eq(vim.api.nvim_get_commands({})["PSQLExportCSV"].range, ".")
+end
+
+T["exports the given range rather than the paragraph"] = function()
+	local export = require("psql.export")
+	local original_run, original_input = export.run, vim.ui.input
+	local captured
+
+	export.run = function(sql, path, cb)
+		captured = sql
+		cb(path, nil)
+	end
+	vim.ui.input = function(_, cb) cb("/tmp/psql-range-test.csv") end
+	local original_notify = vim.notify
+	vim.notify = function() end
+
+	-- One paragraph, no blank line: without a range the whole block is taken.
+	vim.api.nvim_buf_set_lines(0, 0, -1, false, {
+		"TRUNCATE t;",
+		"SELECT a",
+		"FROM t;",
+	})
+	psql.export_csv({ range = 2, line1 = 2, line2 = 3 })
+
+	vim.notify = original_notify
+	vim.ui.input = original_input
+	export.run = original_run
+
+	eq(captured, "SELECT a\nFROM t;")
+end
+
 return T

@@ -117,22 +117,28 @@ function M.yank_csv()
 	vim.notify(string.format("psql.nvim: yanked %d row(s) as CSV", #rows))
 end
 
--- The result buffer exports the query it is showing; any other buffer
--- exports the SQL paragraph under the cursor.
-local function query_to_export()
+-- The result buffer exports the query it is showing. Any other buffer
+-- exports the given range -- which is how a visual selection reaches a user
+-- command -- or the SQL paragraph under the cursor when no range is given.
+local function query_to_export(opts)
 	local name = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ":t")
 	if name == "__SQL__" then
 		return M.last_query()
 	end
 
 	local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
-	local lnum = vim.api.nvim_win_get_cursor(0)[1]
-	local start, stop = M.paragraph_range(lines, lnum)
+	local start, stop
+	if opts ~= nil and (opts.range or 0) > 0 then
+		start, stop = opts.line1, opts.line2
+	else
+		start, stop = M.paragraph_range(lines, vim.api.nvim_win_get_cursor(0)[1])
+	end
 	return table.concat(vim.list_slice(lines, start, stop), "\n")
 end
 
-function M.export_csv()
-	local sql = vim.trim(query_to_export() or "")
+-- opts is the user command table, or nil when called straight from Lua.
+function M.export_csv(opts)
+	local sql = vim.trim(query_to_export(opts) or "")
 	if sql == "" then
 		vim.notify("psql.nvim: nothing to export", vim.log.levels.WARN)
 		return
@@ -180,7 +186,9 @@ local function declare_commands()
 
 	command("PSQLTemp", function() scratch.open() end, {})
 	command("PSQLCancel", function() exec.cancel("user") end, {})
-	command("PSQLExportCSV", function() M.export_csv() end, {})
+	-- range = true: typing : in visual mode prefills '<,'>, which would
+	-- otherwise fail with E481 before the command even runs.
+	command("PSQLExportCSV", function(opts) M.export_csv(opts) end, { range = true })
 
 	command("PSQLInfo", function()
 		local name = config.current_name()
