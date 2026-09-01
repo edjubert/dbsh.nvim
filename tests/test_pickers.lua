@@ -40,4 +40,62 @@ T["reports a clear error when telescope is unavailable"] = function()
 	expect_match(notified, "telescope")
 end
 
+T["falls back to an input prompt when telescope is unavailable"] = function()
+	local original_telescope = pickers._telescope
+	local original_input = vim.ui.input
+	pickers._telescope = function() return nil end
+
+	local asked
+	vim.ui.input = function(opts, cb)
+		asked = opts
+		cb("public.events")
+	end
+
+	local got
+	pickers.variable("raw_data", { "analytics.events" }, function(value) got = value end)
+
+	vim.ui.input = original_input
+	pickers._telescope = original_telescope
+
+	eq(got, "public.events")
+	expect_match(asked.prompt, "raw_data")
+	eq(asked.default, "analytics.events")
+end
+
+T["prefills the input with nothing when there is no history"] = function()
+	local original_telescope = pickers._telescope
+	local original_input = vim.ui.input
+	pickers._telescope = function() return nil end
+
+	local asked
+	vim.ui.input = function(opts, cb)
+		asked = opts
+		cb(nil)
+	end
+
+	local got = "untouched"
+	pickers.variable("raw_data", {}, function(value) got = value end)
+
+	vim.ui.input = original_input
+	pickers._telescope = original_telescope
+
+	eq(asked.default, "")
+	eq(got, nil)
+end
+
+T["reports a clear error path for every picker"] = function()
+	-- variable() must never raise when telescope is missing, unlike the
+	-- other pickers it degrades to a prompt rather than an error.
+	local original = pickers._telescope
+	pickers._telescope = function() return nil end
+	local original_input = vim.ui.input
+	vim.ui.input = function(_, cb) cb(nil) end
+
+	local ok = pcall(pickers.variable, "raw_data", {}, function() end)
+
+	vim.ui.input = original_input
+	pickers._telescope = original
+	eq(ok, true)
+end
+
 return T
