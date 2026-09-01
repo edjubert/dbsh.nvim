@@ -55,11 +55,12 @@ function M.write(path, contents)
 	return path, nil
 end
 
--- callback(path, err)
-function M.run(sql, path, callback)
+-- preamble holds psql directives (\set ...) that must run before the COPY
+-- statement, never inside its parentheses. callback(path, err)
+function M.run(sql, path, preamble, callback)
 	local query = M.copy_query(sql, config.options().csv_delimiter)
 	-- Raw mode: no \timing, no decoration, so stdout is the CSV itself.
-	exec.run(query, { raw = true }, function(code, stdout, stderr)
+	exec.run((preamble or "") .. query, { raw = true }, function(code, stdout, stderr)
 		if code ~= 0 then
 			callback(nil, stderr ~= "" and stderr or "psql exited with code " .. tostring(code))
 			return

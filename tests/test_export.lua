@@ -84,7 +84,7 @@ T["writes the psql output to the target file"] = function()
 	stub_output("id,name\n1,alice\n")
 	local path = vim.fs.joinpath(tmpdir, "out.csv")
 	local got
-	export.run("SELECT 1;", path, function(p) got = p end)
+	export.run("SELECT 1;", path, nil, function(p) got = p end)
 	vim.wait(500, function() return got ~= nil end)
 	eq(got, path)
 	eq(vim.fn.readfile(path), { "id,name", "1,alice" })
@@ -93,9 +93,49 @@ end
 T["surfaces the error when psql fails"] = function()
 	stub_output("", 2)
 	local err
-	export.run("SELECT 1;", vim.fs.joinpath(tmpdir, "out.csv"), function(_, e) err = e end)
+	export.run("SELECT 1;", vim.fs.joinpath(tmpdir, "out.csv"), nil, function(_, e) err = e end)
 	vim.wait(500, function() return err ~= nil end)
 	expect_match(err, "boom")
+end
+
+T["sends the preamble before the copy statement"] = function()
+	local seen
+	exec.runner = function(argv, _, on_exit)
+		-- exec.run writes the script to the file passed after -f.
+		for index, argument in ipairs(argv) do
+			if argument == "-f" then
+				seen = table.concat(vim.fn.readfile(argv[index + 1]), "\n")
+			end
+		end
+		vim.schedule(function()
+			on_exit({ code = 0, stdout = "", stderr = "" })
+		end)
+		return { kill = function() end }
+	end
+
+	local got
+	export.run(
+		"SELECT * FROM :raw_data;",
+		vim.fs.joinpath(tmpdir, "out.csv"),
+		"\\set raw_data 'public.events'\n",
+		function(p) got = p end
+	)
+	vim.wait(500, function() return got ~= nil end)
+
+	local set_at = seen:find("\\set raw_data", 1, true)
+	local copy_at = seen:find("COPY (", 1, true)
+	eq(set_at ~= nil, true)
+	eq(copy_at ~= nil, true)
+	eq(set_at < copy_at, true)
+end
+
+T["works without a preamble"] = function()
+	stub_output("id\n1\n")
+	local path = vim.fs.joinpath(tmpdir, "plain.csv")
+	local got
+	export.run("SELECT 1;", path, nil, function(p) got = p end)
+	vim.wait(500, function() return got ~= nil end)
+	eq(vim.fn.readfile(path), { "id", "1" })
 end
 
 return T
