@@ -203,4 +203,71 @@ function M.tables(opts)
 	end)
 end
 
+-- Asks for the value of a SQL variable. The prompt doubles as the input
+-- field: <CR> takes the highlighted entry when there is one, the typed text
+-- otherwise, and <C-e> always takes the typed text -- without it a value
+-- that is a substring of an existing one could never be entered.
+-- callback(value) receives nil when the user gives up.
+function M.variable(name, choices, callback)
+	choices = choices or {}
+
+	local t = M._telescope()
+	if t == nil then
+		vim.ui.input(
+			{ prompt = "psql variable " .. name .. " = ", default = choices[1] or "" },
+			callback
+		)
+		return
+	end
+
+	-- Guards against answering twice: the close autocommand fires after a
+	-- selection too.
+	local answered = false
+	local function answer(value)
+		if answered then
+			return
+		end
+		answered = true
+		callback(value)
+	end
+
+	open(t, {
+		title = "PSQL variable " .. name,
+		results = choices,
+		entry_maker = plain_entry,
+		attach_mappings = function(bufnr, map)
+			local function take(typed_only)
+				local entry = t.state.get_selected_entry()
+				local typed = t.state.get_current_line()
+				local value
+				if typed_only or entry == nil then
+					value = typed ~= "" and typed or nil
+				else
+					value = entry.value
+				end
+				-- Claim the answer before close(): closing the window fires the
+				-- BufWinLeave autocommand synchronously, and without the guard
+				-- set first it would read the selection as a cancellation.
+				answered = true
+				t.actions.close(bufnr)
+				callback(value)
+			end
+
+			map("i", "<CR>", function() take(false) end)
+			map("n", "<CR>", function() take(false) end)
+			map("i", "<C-e>", function() take(true) end)
+			map("n", "<C-e>", function() take(true) end)
+
+			-- Closing the picker any other way is a cancellation, and the
+			-- caller has to hear about it or its chain stalls forever.
+			vim.api.nvim_create_autocmd("BufWinLeave", {
+				buffer = bufnr,
+				once = true,
+				callback = function() answer(nil) end,
+			})
+			return true
+		end,
+	})
+end
+
 return M

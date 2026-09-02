@@ -158,6 +158,7 @@ require("psql").setup({
 	csv_delimiter = ",",
 	export_dir = vim.fs.joinpath(vim.fn.stdpath("data"), "psql", "exports"),
 	results_split = "horizontal",
+	variable_patterns = {}, -- e.g. { ":(raw_data)" }, see SQL variables below
 })
 ```
 
@@ -171,6 +172,7 @@ require("psql").setup({
 | `csv_delimiter` | `","` | Column separator, for both CSV export and CSV yank. |
 | `export_dir` | `<stdpath("data")>/psql/exports` | Where `:PSQLExportCSV` suggests writing. |
 | `results_split` | `"horizontal"` | `"horizontal"` or `"vertical"`: which split opens `__SQL__` in. Only applies the first time the window is created; combine with `vim.opt.splitright = true` for a right-hand split. |
+| `variable_patterns` | `{}` | Lua patterns (one capture each) naming SQL variables to prompt for. See [SQL variables](#sql-variables). |
 
 There is deliberately **no** `password` field.
 
@@ -338,6 +340,68 @@ normally, and the file survives restarts.
 Each connection gets its own, so your working queries follow the database you are
 working on.
 
+## SQL variables
+
+Shared SQL files often target a table that changes from one run to the next:
+
+```sql
+SELECT * FROM :raw_data WHERE created_at > now() - interval '7 days';
+```
+
+Declare which names are variables, and psql.nvim asks for their value before
+running the query:
+
+```lua
+variable_patterns = { ":(raw_data)" },
+```
+
+Each entry is a Lua pattern with **one capture**, which gives the variable name.
+This mirrors the *User Parameters* setting of JetBrains DataGrip, where the same
+declaration reads `:(raw_data)`. The default is an empty list, so no existing SQL
+file changes behaviour until you opt in.
+
+<!-- SCREENSHOT: the "PSQL variable raw_data" picker open over a SQL buffer,
+     listing two previously used table names. -->
+![Variable prompt](docs/media/variable-prompt.png)
+
+The prompt doubles as the input field: the list holds the values you already used
+for that variable, most recent first. `<CR>` takes the highlighted entry, or the
+text you typed when nothing matches. `<C-e>` always takes the typed text, which is
+how you enter a value that happens to be a substring of an existing one. Dismissing
+the prompt cancels the whole run — a half-parameterised query never reaches the
+server.
+
+Without telescope.nvim, the prompt degrades to `vim.ui.input`, prefilled with the
+most recent value.
+
+Values are remembered per connection in
+`<stdpath("data")>/psql/vars/<connection>.json`, deduplicated and capped at 50 per
+variable. Table and schema names only make sense on the database they came from,
+which is the same reasoning the scratchpad follows. Edit or delete that file by
+hand if you need to clean it up.
+
+### How substitution works
+
+The plugin does **not** rewrite your SQL. It emits `\set` directives ahead of the
+query and lets `psql` interpolate `:name` itself. Two consequences worth knowing:
+
+- Nothing is ever substituted inside a quoted literal, because `psql` does not
+  interpolate there. That is the guarantee DataGrip has to offer as a checkbox.
+- Only `:name`-shaped variables can work. A bare token with no colon is not
+  something `psql` can interpolate.
+
+### Choosing a pattern
+
+A wide pattern catches everything at once:
+
+```lua
+variable_patterns = { ":([%w_]+)" },
+```
+
+Be aware it also matches things you did not mean: `a::text` yields a variable
+named `text`, and `'12:30'` yields `30`. Naming each variable explicitly, as in
+`":(raw_data)"`, avoids this entirely and is the recommended default.
+
 ## CSV export
 
 <!--
@@ -358,6 +422,9 @@ where you run it:
 - from the `__SQL__` buffer — the query currently displayed, re-run;
 - over a **visual selection** — the selected lines;
 - anywhere else — the SQL paragraph under the cursor.
+
+Queries holding SQL variables are resolved before the export, so `:PSQLExportCSV`
+asks for their values first and the destination path second.
 
 The suggested path is `<export_dir>/<YYYYMMDD>_<connection>.csv`, or
 `..._scratchpad.csv` when no connection is selected. It gains a `_1`, `_2` suffix

@@ -6,6 +6,7 @@ local results = require("psql.results")
 local scratch = require("psql.scratch")
 local csv = require("psql.csv")
 local export = require("psql.export")
+local resolve = require("psql.resolve")
 
 local M = {}
 
@@ -25,14 +26,23 @@ function M.query(sql)
 	end
 
 	last_query = sql
-	local split_opts = { split = config.options().results_split }
-	results.running(sql, split_opts)
-	exec.run(sql, {}, function(code, stdout, stderr)
-		local output = stdout
-		if code ~= 0 then
-			output = stderr ~= "" and stderr or stdout
+	resolve.preamble(sql, function(preamble)
+		-- nil means the user dismissed a prompt: run nothing, say nothing.
+		if preamble == nil then
+			return
 		end
-		results.render(sql, output, split_opts)
+
+		-- The result buffer shows the query as written; only psql sees the
+		-- \set directives.
+		local split_opts = { split = config.options().results_split }
+		results.running(sql, split_opts)
+		exec.run(preamble .. sql, {}, function(code, stdout, stderr)
+			local output = stdout
+			if code ~= 0 then
+				output = stderr ~= "" and stderr or stdout
+			end
+			results.render(sql, output, split_opts)
+		end)
 	end)
 end
 
@@ -164,31 +174,39 @@ function M.export_csv(opts)
 		return
 	end
 
-	local dir = config.options().export_dir
-	vim.fn.mkdir(dir, "p")
-	local suggestion = export.default_path(
-		dir,
-		config.current_name() or "scratchpad",
-		os.date("%Y%m%d")
-	)
+	-- Variables first, destination second: dismissing a prompt must not
+	-- ask for a path that will never be used.
+	resolve.preamble(sql, function(preamble)
+		if preamble == nil then
+			return
+		end
 
-	vim.ui.input(
-		{ prompt = "Export to: ", default = suggestion, completion = "file" },
-		function(choice)
-			if choice == nil or vim.trim(choice) == "" then
-				return
-			end
-			-- The suggestion may have been edited onto an existing file.
-			local path = export.free_path(vim.trim(choice))
-			export.run(sql, path, function(written, err)
-				if err ~= nil then
-					vim.notify("psql.nvim: " .. err, vim.log.levels.ERROR)
+		local dir = config.options().export_dir
+		vim.fn.mkdir(dir, "p")
+		local suggestion = export.default_path(
+			dir,
+			config.current_name() or "scratchpad",
+			os.date("%Y%m%d")
+		)
+
+		vim.ui.input(
+			{ prompt = "Export to: ", default = suggestion, completion = "file" },
+			function(choice)
+				if choice == nil or vim.trim(choice) == "" then
 					return
 				end
-				vim.notify("psql.nvim: exported to " .. written)
-			end)
-		end
-	)
+				-- The suggestion may have been edited onto an existing file.
+				local path = export.free_path(vim.trim(choice))
+				export.run(sql, path, preamble, function(written, err)
+					if err ~= nil then
+						vim.notify("psql.nvim: " .. err, vim.log.levels.ERROR)
+						return
+					end
+					vim.notify("psql.nvim: exported to " .. written)
+				end)
+			end
+		)
+	end)
 end
 
 local function pickers()
