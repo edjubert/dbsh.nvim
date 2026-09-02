@@ -191,7 +191,7 @@ T["exports the given range rather than the paragraph"] = function()
 	local original_run, original_input = export.run, vim.ui.input
 	local captured
 
-	export.run = function(sql, path, cb)
+	export.run = function(sql, path, _, cb)
 		captured = sql
 		cb(path, nil)
 	end
@@ -212,6 +212,89 @@ T["exports the given range rather than the paragraph"] = function()
 	export.run = original_run
 
 	eq(captured, "SELECT a\nFROM t;")
+end
+
+T["sends the preamble to psql but renders only the query"] = function()
+	local resolve = require("psql.resolve")
+	local original_preamble = resolve.preamble
+	resolve.preamble = function(_, cb) cb("\\set raw_data 'public.events'\n") end
+
+	local script
+	exec.runner = function(argv, _, on_exit)
+		-- exec.run writes the script to the file passed after -f.
+		for index, argument in ipairs(argv) do
+			if argument == "-f" then
+				script = table.concat(vim.fn.readfile(argv[index + 1]), "\n")
+			end
+		end
+		vim.schedule(function()
+			on_exit({ code = 0, stdout = "one", stderr = "" })
+		end)
+		return { kill = function() end }
+	end
+
+	psql.query("SELECT * FROM :raw_data;")
+
+	local buf
+	vim.wait(1000, function()
+		buf = results.find_buf()
+		return buf ~= nil and vim.api.nvim_buf_get_lines(buf, 0, 1, true)[1] == "SELECT * FROM :raw_data;"
+	end)
+	resolve.preamble = original_preamble
+
+	-- Lua patterns escape with %, not with a backslash, so this matches the
+	-- single backslash the directive actually holds.
+	expect_match(script, "\\set raw_data")
+	local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, true)
+	eq(lines, { "SELECT * FROM :raw_data;", "", "one" })
+end
+
+T["runs nothing when the variable prompt is cancelled"] = function()
+	local resolve = require("psql.resolve")
+	local original_preamble = resolve.preamble
+	resolve.preamble = function(_, cb) cb(nil) end
+
+	local ran = false
+	exec.runner = function(_, _, _)
+		ran = true
+		return { kill = function() end }
+	end
+
+	psql.query("SELECT * FROM :raw_data;")
+	vim.wait(200, function() return ran end)
+
+	resolve.preamble = original_preamble
+	eq(ran, false)
+end
+
+T["hands the preamble to the csv export"] = function()
+	local resolve = require("psql.resolve")
+	local export = require("psql.export")
+	local original_preamble, original_run = resolve.preamble, export.run
+	local original_input, original_notify = vim.ui.input, vim.notify
+
+	resolve.preamble = function(_, cb) cb("\\set raw_data 'public.events'\n") end
+	vim.ui.input = function(_, cb) cb("/tmp/psql-variables-test.csv") end
+	vim.notify = function() end
+
+	local seen
+	export.run = function(_, path, preamble, cb)
+		seen = preamble
+		cb(path, nil)
+	end
+
+	-- A fresh buffer, so the export never mistakes a leftover __SQL__ for
+	-- the current one and falls back to last_query.
+	vim.api.nvim_set_current_buf(vim.api.nvim_create_buf(true, true))
+	vim.api.nvim_buf_set_lines(0, 0, -1, false, { "SELECT * FROM :raw_data;" })
+	psql.export_csv({ range = 0 })
+
+	vim.notify = original_notify
+	vim.ui.input = original_input
+	export.run = original_run
+	resolve.preamble = original_preamble
+
+	eq(seen, "\\set raw_data 'public.events'\n")
 end
 
 return T
