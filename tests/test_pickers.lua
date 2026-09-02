@@ -83,6 +83,93 @@ T["prefills the input with nothing when there is no history"] = function()
 	eq(got, nil)
 end
 
+-- A stand-in telescope whose close() really closes the picker window, so
+-- the BufWinLeave autocommand fires exactly as it does with the real thing.
+local function fake_telescope(selected_entry, typed)
+	local buf = vim.api.nvim_create_buf(false, true)
+	local win = vim.api.nvim_open_win(buf, true, {
+		relative = "editor",
+		row = 0,
+		col = 0,
+		width = 20,
+		height = 5,
+	})
+
+	-- attach_mappings runs inside find(), so the test reads the map table
+	-- from this shared cell after variable() returns.
+	local cell = { maps = nil }
+	local fake = {
+		pickers = {
+			new = function(_, opts)
+				return {
+					find = function()
+						cell.maps = {}
+						local ok = opts.attach_mappings(buf, function(mode, key, fn)
+							cell.maps[mode .. "|" .. key] = fn
+						end)
+						assert(ok == true)
+					end,
+				}
+			end,
+		},
+		finders = { new_table = function(_) return {} end },
+		conf = { generic_sorter = function(_) return {} end },
+		actions = { close = function() vim.api.nvim_win_close(win, false) end },
+		state = {
+			get_selected_entry = function() return selected_entry end,
+			get_current_line = function() return typed end,
+		},
+	}
+	return fake, cell
+end
+
+T["answers the highlighted entry even though close fires BufWinLeave"] = function()
+	local fake, cell = fake_telescope({ value = "analytics.events" }, "")
+
+	local original = pickers._telescope
+	pickers._telescope = function() return fake end
+
+	local got = "untouched"
+	pickers.variable("raw_data", { "analytics.events" }, function(value) got = value end)
+
+	pickers._telescope = original
+
+	-- <CR> on the highlighted entry must answer with it, not with the
+	-- cancellation the BufWinLeave autocommand raises on close.
+	cell.maps["i|<CR>"]()
+	eq(got, "analytics.events")
+end
+
+T["takes the typed text with <C-e> even though close fires BufWinLeave"] = function()
+	local fake, cell = fake_telescope(nil, "my_table")
+
+	local original = pickers._telescope
+	pickers._telescope = function() return fake end
+
+	local got = "untouched"
+	pickers.variable("raw_data", {}, function(value) got = value end)
+
+	pickers._telescope = original
+
+	cell.maps["i|<C-e>"]()
+	eq(got, "my_table")
+end
+
+T["treats <CR> on an empty prompt as a cancellation"] = function()
+	local fake, cell = fake_telescope(nil, "")
+
+	local original = pickers._telescope
+	pickers._telescope = function() return fake end
+
+	local got = "untouched"
+	pickers.variable("raw_data", {}, function(value) got = value end)
+
+	pickers._telescope = original
+
+	cell.maps["i|<CR>"]()
+	eq(got, nil)
+end
+
 T["reports a clear error path for every picker"] = function()
 	-- variable() must never raise when telescope is missing, unlike the
 	-- other pickers it degrades to a prompt rather than an error.

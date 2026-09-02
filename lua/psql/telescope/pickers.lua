@@ -239,12 +239,18 @@ function M.variable(name, choices, callback)
 			local function take(typed_only)
 				local entry = t.state.get_selected_entry()
 				local typed = t.state.get_current_line()
-				t.actions.close(bufnr)
+				local value
 				if typed_only or entry == nil then
-					answer(typed ~= "" and typed or nil)
+					value = typed ~= "" and typed or nil
 				else
-					answer(entry.value)
+					value = entry.value
 				end
+				-- Claim the answer before close(): closing the window fires the
+				-- BufWinLeave autocommand synchronously, and without the guard
+				-- set first it would read the selection as a cancellation.
+				answered = true
+				t.actions.close(bufnr)
+				callback(value)
 			end
 
 			map("i", "<CR>", function() take(false) end)
