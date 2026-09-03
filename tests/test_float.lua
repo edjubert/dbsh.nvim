@@ -28,6 +28,14 @@ T["falls back to rounded border on malformed borderchars"] = function()
 	eq(float.border_from_telescope({ "1", "2" }), "rounded")
 end
 
+T["ignores a non-numeric winblend from telescope's config"] = function()
+	package.loaded["telescope.config"] = { values = { winblend = function() return 10 end } }
+	local ok, style = pcall(float.style)
+	package.loaded["telescope.config"] = nil
+	eq(ok, true)
+	eq(style.winblend, 0)
+end
+
 T["falls back to sane defaults when telescope is not installed"] = function()
 	-- The test environment never has telescope on the runtimepath.
 	local style = float.style()

@@ -44,7 +44,9 @@ function M.style()
 	local layout = values.layout_config or {}
 	return {
 		border = M.border_from_telescope(values.borderchars),
-		winblend = values.winblend or DEFAULT_WINBLEND,
+		-- winblend can be a function in some telescope themes; only a
+		-- plain number is usable as a window option value here.
+		winblend = ratio(values.winblend, DEFAULT_WINBLEND),
 		width = ratio(layout.width, DEFAULT_WIDTH),
 		height = ratio(layout.height, DEFAULT_HEIGHT),
 	}
