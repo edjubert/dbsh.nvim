@@ -97,4 +97,33 @@ T["only splits once, regardless of the direction asked afterwards"] = function()
 	eq(first, second)
 end
 
+T["opens a floating window when asked"] = function()
+	local _, win = results.open({ split = "float" })
+	eq(vim.api.nvim_win_get_config(win).relative, "editor")
+end
+
+T["close hides the window but keeps the buffer and its content"] = function()
+	local buf = results.render("SELECT 1;", "one")
+	results.close()
+	eq(results.find_win(buf), nil)
+	eq(vim.api.nvim_buf_get_lines(buf, 0, -1, true), { "SELECT 1;", "", "one" })
+end
+
+T["toggle closes an open result window"] = function()
+	local buf = results.open()
+	eq(results.toggle(), true)
+	eq(results.find_win(buf), nil)
+end
+
+T["toggle reopens a closed result window"] = function()
+	local buf = results.open()
+	results.close()
+	eq(results.toggle(), true)
+	eq(vim.tbl_contains(vim.api.nvim_list_wins(), results.find_win(buf)), true)
+end
+
+T["toggle reports no result yet when nothing was rendered"] = function()
+	eq(results.toggle(), false)
+end
+
 return T

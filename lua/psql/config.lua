@@ -13,7 +13,8 @@ local defaults = {
 	-- Column separator used both by the CSV yank and by the file export.
 	csv_delimiter = ",",
 	export_dir = vim.fs.joinpath(vim.fn.stdpath("data"), "psql", "exports"),
-	-- "horizontal" or "vertical": which split opens the result buffer in.
+	-- "horizontal", "vertical" or "float": which split opens the result
+	-- buffer in. "float" is styled after the user's telescope config.
 	results_split = "horizontal",
 	-- Lua patterns, each with a single capture giving the variable name.
 	-- Empty by default: no SQL file changes behaviour unless asked.

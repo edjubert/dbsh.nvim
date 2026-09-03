@@ -224,6 +224,12 @@ local function declare_commands()
 
 	command("PSQLTemp", function() scratch.open() end, {})
 	command("PSQLCancel", function() exec.cancel("user") end, {})
+	command("PSQLToggleResults", function()
+		local ok = results.toggle({ split = config.options().results_split })
+		if not ok then
+			vim.notify("psql.nvim: no result yet", vim.log.levels.WARN)
+		end
+	end, {})
 	-- range = true: typing : in visual mode prefills '<,'>, which would
 	-- otherwise fail with E481 before the command even runs.
 	command("PSQLExportCSV", function(opts) M.export_csv(opts) end, { range = true })

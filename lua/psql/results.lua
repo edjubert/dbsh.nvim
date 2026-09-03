@@ -2,6 +2,8 @@
 -- The buffer is reused across queries, which keeps a history of previous
 -- results, and never soft-wraps: wide tables scroll horizontally instead.
 
+local float = require("psql.float")
+
 local M = {}
 
 local BUFNAME = "__SQL__"
@@ -28,10 +30,12 @@ function M.find_win(buf)
 	return nil
 end
 
--- opts: { split = "horizontal"|"vertical"? }. Only read the first time a
--- window is created for this buffer: once open, the existing window is
--- reused regardless of what a later call asks for.
+-- opts: { split = "horizontal"|"vertical"|"float"?, focus = boolean? }.
+-- `split` is only read the first time a window is created for this buffer:
+-- once open, the existing window is reused regardless of what a later call
+-- asks for. `focus` only applies to a float, and defaults to true.
 function M.open(opts)
+	opts = opts or {}
 	local buf = M.find_buf()
 	if buf == nil then
 		buf = vim.api.nvim_create_buf(false, true)
@@ -44,10 +48,13 @@ function M.open(opts)
 
 	local win = M.find_win(buf)
 	if win == nil then
-		local split = (opts or {}).split
-		vim.cmd(split == "vertical" and "vsplit" or "split")
-		win = vim.api.nvim_get_current_win()
-		vim.api.nvim_win_set_buf(win, buf)
+		if opts.split == "float" then
+			win = float.open(buf, { focus = opts.focus })
+		else
+			vim.cmd(opts.split == "vertical" and "vsplit" or "split")
+			win = vim.api.nvim_get_current_win()
+			vim.api.nvim_win_set_buf(win, buf)
+		end
 	end
 
 	-- Rendered by the plugin only: hand editing would desync it from psql.
@@ -58,6 +65,34 @@ function M.open(opts)
 	vim.wo[win].sidescrolloff = 0
 
 	return buf, win
+end
+
+-- Closes the result window, if one is open. The buffer and its content
+-- survive: a later render() or toggle() brings it back as-is.
+function M.close()
+	local buf = M.find_buf()
+	if buf == nil then
+		return
+	end
+	local win = M.find_win(buf)
+	if win ~= nil then
+		vim.api.nvim_win_close(win, false)
+	end
+end
+
+-- Toggles the result window: closes it if open, otherwise reopens it with
+-- focus. Returns false when there is no result yet to show.
+function M.toggle(opts)
+	local buf = M.find_buf()
+	if buf == nil then
+		return false
+	end
+	if M.find_win(buf) ~= nil then
+		M.close()
+	else
+		M.open(vim.tbl_extend("force", opts or {}, { focus = true }))
+	end
+	return true
 end
 
 local function set_lines(buf, lines)
@@ -74,8 +109,14 @@ local function split_lines(text)
 	return vim.split(text or "", "\n", { plain = true })
 end
 
+-- A query result never steals focus on its own: only :PSQLToggleResults
+-- (via M.toggle) does, so typing in a .sql file is never interrupted.
+local function without_focus(opts)
+	return vim.tbl_extend("force", opts or {}, { focus = false })
+end
+
 function M.running(query, opts)
-	local buf = M.open(opts)
+	local buf = M.open(without_focus(opts))
 	local lines = { "# Running..." }
 	vim.list_extend(lines, split_lines(query))
 	table.insert(lines, "")
@@ -85,7 +126,7 @@ function M.running(query, opts)
 end
 
 function M.render(query, output, opts)
-	local buf = M.open(opts)
+	local buf = M.open(without_focus(opts))
 	local lines = split_lines(query)
 	table.insert(lines, "")
 	vim.list_extend(lines, split_lines(output))

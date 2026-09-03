@@ -171,7 +171,7 @@ require("psql").setup({
 | `preview_limit` | `10` | `LIMIT` used when previewing a table from the picker. |
 | `csv_delimiter` | `","` | Column separator, for both CSV export and CSV yank. |
 | `export_dir` | `<stdpath("data")>/psql/exports` | Where `:PSQLExportCSV` suggests writing. |
-| `results_split` | `"horizontal"` | `"horizontal"` or `"vertical"`: which split opens `__SQL__` in. Only applies the first time the window is created; combine with `vim.opt.splitright = true` for a right-hand split. |
+| `results_split` | `"horizontal"` | `"horizontal"`, `"vertical"` or `"float"`: which window opens `__SQL__` in. Only applies the first time the window is created; combine with `vim.opt.splitright = true` for a right-hand split. `"float"` is styled after your telescope config, when installed. |
 | `variable_patterns` | `{}` | Lua patterns (one capture each) naming SQL variables to prompt for. See [SQL variables](#sql-variables). |
 
 There is deliberately **no** `password` field.
@@ -205,6 +205,7 @@ unexpected password prompt, and it is the single most common setup mistake.
 | `:PSQLSchemas` | pick a schema, then drill into its tables |
 | `:PSQLTables` | pick any table, as a flat `schema.table` list |
 | `:PSQLTemp` | open the scratchpad of the current connection |
+| `:PSQLToggleResults` | toggle the result window closed or open, keeping its content |
 | `:PSQLExportCSV` | export a query result to a CSV file — accepts a range |
 | `:PSQLCancel` | cancel the running query |
 | `:PSQLInfo` | show the current connection and database |
