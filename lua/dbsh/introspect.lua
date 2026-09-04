@@ -2,8 +2,8 @@
 -- Runs in raw mode (-A -t -F '\t') so the output can be parsed reliably,
 -- unlike the decorated output used for user queries.
 
-local config = require("psql.config")
-local exec = require("psql.exec")
+local config = require("dbsh.config")
+local exec = require("dbsh.exec")
 
 local M = {}
 

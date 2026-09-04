@@ -1,7 +1,7 @@
 local helpers = dofile("tests/helpers.lua")
 local eq, expect_match = helpers.eq, helpers.expect_match
 
-local config = require("psql.config")
+local config = require("dbsh.config")
 
 local T = MiniTest.new_set({
 	hooks = {
@@ -68,7 +68,7 @@ T["applies csv export defaults"] = function()
 	eq(config.options().csv_delimiter, ",")
 	eq(
 		config.options().export_dir,
-		vim.fs.joinpath(vim.fn.stdpath("data"), "psql", "exports")
+		vim.fs.joinpath(vim.fn.stdpath("data"), "dbsh", "exports")
 	)
 end
 

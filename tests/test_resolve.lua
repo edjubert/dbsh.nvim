@@ -1,9 +1,9 @@
 local helpers = dofile("tests/helpers.lua")
 local eq = helpers.eq
 
-local config = require("psql.config")
-local history = require("psql.history")
-local resolve = require("psql.resolve")
+local config = require("dbsh.config")
+local history = require("dbsh.history")
+local resolve = require("dbsh.resolve")
 
 local original_picker
 local original_dir

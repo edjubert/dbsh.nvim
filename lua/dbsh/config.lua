@@ -1,4 +1,4 @@
--- Connection state for psql.nvim.
+-- Connection state for dbsh.nvim.
 -- Holds the declared connections, the currently selected one, and a generation
 -- counter used to invalidate in-flight query callbacks.
 
@@ -12,7 +12,7 @@ local defaults = {
 	preview_limit = 10,
 	-- Column separator used both by the CSV yank and by the file export.
 	csv_delimiter = ",",
-	export_dir = vim.fs.joinpath(vim.fn.stdpath("data"), "psql", "exports"),
+	export_dir = vim.fs.joinpath(vim.fn.stdpath("data"), "dbsh", "exports"),
 	-- "horizontal", "vertical" or "float": which split opens the result
 	-- buffer in. "float" is styled after the user's telescope config.
 	results_split = "horizontal",

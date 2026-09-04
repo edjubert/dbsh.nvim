@@ -4,8 +4,8 @@
 -- COPY ... TO '<file>' would need a superuser right and write server side.
 -- The file itself is therefore written by Neovim.
 
-local config = require("psql.config")
-local exec = require("psql.exec")
+local config = require("dbsh.config")
+local exec = require("dbsh.exec")
 
 local M = {}
 
