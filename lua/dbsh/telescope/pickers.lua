@@ -2,8 +2,8 @@
 -- Telescope is an optional dependency: every picker degrades to a clear
 -- message when it is not installed.
 
-local config = require("psql.config")
-local introspect = require("psql.introspect")
+local config = require("dbsh.config")
+local introspect = require("dbsh.introspect")
 
 local M = {}
 
@@ -54,7 +54,7 @@ local function require_telescope()
 end
 
 local function notify_error(err)
-	vim.notify("psql.nvim: " .. err, vim.log.levels.ERROR)
+	vim.notify("dbsh.nvim: " .. err, vim.log.levels.ERROR)
 end
 
 local function open(t, opts)
@@ -93,7 +93,7 @@ function M.connections()
 	end
 
 	open(t, {
-		title = "PSQL connections",
+		title = "dbsh connections",
 		results = config.names(),
 		entry_maker = plain_entry,
 		attach_mappings = function(bufnr, map)
@@ -122,7 +122,7 @@ function M.databases()
 			return notify_error(err)
 		end
 		open(t, {
-			title = "PSQL databases",
+			title = "dbsh databases",
 			results = names,
 			entry_maker = plain_entry,
 			attach_mappings = function(bufnr, map)
@@ -152,7 +152,7 @@ function M.schemas()
 			return notify_error(err)
 		end
 		open(t, {
-			title = "PSQL schemas",
+			title = "dbsh schemas",
 			results = names,
 			entry_maker = plain_entry,
 			attach_mappings = function(bufnr, map)
@@ -179,14 +179,14 @@ function M.tables(opts)
 			return notify_error(err)
 		end
 		open(t, {
-			title = opts.schema and ("PSQL tables - " .. opts.schema) or "PSQL tables",
+			title = opts.schema and ("dbsh tables - " .. opts.schema) or "dbsh tables",
 			results = rows,
 			entry_maker = M.format_table_entry,
 			attach_mappings = function(bufnr, map)
 				bind_enter(t, bufnr, map, function(entry)
 					local sql = introspect.preview_query(entry.value.schema, entry.value.name)
-					-- Deferred require: psql.init imports this module.
-					require("psql").query(sql)
+					-- Deferred require: dbsh.init imports this module.
+					require("dbsh").query(sql)
 				end)
 
 				-- Normal mode only: mapping <BS> in insert mode would break
@@ -214,7 +214,7 @@ function M.variable(name, choices, callback)
 	local t = M._telescope()
 	if t == nil then
 		vim.ui.input(
-			{ prompt = "psql variable " .. name .. " = ", default = choices[1] or "" },
+			{ prompt = "dbsh variable " .. name .. " = ", default = choices[1] or "" },
 			callback
 		)
 		return
@@ -232,7 +232,7 @@ function M.variable(name, choices, callback)
 	end
 
 	open(t, {
-		title = "PSQL variable " .. name,
+		title = "dbsh variable " .. name,
 		results = choices,
 		entry_maker = plain_entry,
 		attach_mappings = function(bufnr, map)

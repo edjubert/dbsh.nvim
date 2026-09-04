@@ -1,12 +1,12 @@
--- Public API and user commands for psql.nvim.
+-- Public API and user commands for dbsh.nvim.
 
-local config = require("psql.config")
-local exec = require("psql.exec")
-local results = require("psql.results")
-local scratch = require("psql.scratch")
-local csv = require("psql.csv")
-local export = require("psql.export")
-local resolve = require("psql.resolve")
+local config = require("dbsh.config")
+local exec = require("dbsh.exec")
+local results = require("dbsh.results")
+local scratch = require("dbsh.scratch")
+local csv = require("dbsh.csv")
+local export = require("dbsh.export")
+local resolve = require("dbsh.resolve")
 
 local M = {}
 
@@ -152,7 +152,7 @@ end
 -- command -- or the SQL paragraph under the cursor when no range is given.
 local function query_to_export(opts)
 	local name = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ":t")
-	if name == "__SQL__" then
+	if name == "__DBSH__" then
 		return M.last_query()
 	end
 
@@ -199,7 +199,7 @@ function M.export_csv(opts)
 				local path = export.free_path(vim.trim(choice))
 				export.run(sql, path, preamble, function(written, err)
 					if err ~= nil then
-						vim.notify("psql.nvim: " .. err, vim.log.levels.ERROR)
+						vim.notify("dbsh.nvim: " .. err, vim.log.levels.ERROR)
 						return
 					end
 					vim.notify("psql.nvim: exported to " .. written)
@@ -210,21 +210,21 @@ function M.export_csv(opts)
 end
 
 local function pickers()
-	-- Deferred require: psql.telescope.pickers requires this module back.
-	return require("psql.telescope.pickers")
+	-- Deferred require: dbsh.telescope.pickers requires this module back.
+	return require("dbsh.telescope.pickers")
 end
 
 local function declare_commands()
 	local command = vim.api.nvim_create_user_command
 
-	command("PSQLConnections", function() pickers().connections() end, {})
-	command("PSQLDatabases", function() pickers().databases() end, {})
-	command("PSQLSchemas", function() pickers().schemas() end, {})
-	command("PSQLTables", function() pickers().tables({}) end, {})
+	command("DbConnections", function() pickers().connections() end, {})
+	command("DbDatabases", function() pickers().databases() end, {})
+	command("DbSchemas", function() pickers().schemas() end, {})
+	command("DbTables", function() pickers().tables({}) end, {})
 
-	command("PSQLTemp", function() scratch.open() end, {})
-	command("PSQLCancel", function() exec.cancel("user") end, {})
-	command("PSQLToggleResults", function()
+	command("DbTemp", function() scratch.open() end, {})
+	command("DbCancel", function() exec.cancel("user") end, {})
+	command("DbToggleResults", function()
 		local ok = results.toggle({ split = config.options().results_split })
 		if not ok then
 			vim.notify("psql.nvim: no result yet", vim.log.levels.WARN)
@@ -232,9 +232,9 @@ local function declare_commands()
 	end, {})
 	-- range = true: typing : in visual mode prefills '<,'>, which would
 	-- otherwise fail with E481 before the command even runs.
-	command("PSQLExportCSV", function(opts) M.export_csv(opts) end, { range = true })
+	command("DbExportCSV", function(opts) M.export_csv(opts) end, { range = true })
 
-	command("PSQLInfo", function()
+	command("DbInfo", function()
 		local name = config.current_name()
 		if name == nil then
 			vim.notify("psql.nvim: no current connection", vim.log.levels.WARN)

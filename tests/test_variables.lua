@@ -1,7 +1,7 @@
 local helpers = dofile("tests/helpers.lua")
 local eq = helpers.eq
 
-local variables = require("psql.variables")
+local variables = require("dbsh.variables")
 
 local T = MiniTest.new_set()
 

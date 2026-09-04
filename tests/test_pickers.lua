@@ -1,7 +1,7 @@
 local helpers = dofile("tests/helpers.lua")
 local eq, expect_match = helpers.eq, helpers.expect_match
 
-local pickers = require("psql.telescope.pickers")
+local pickers = require("dbsh.telescope.pickers")
 
 local T = MiniTest.new_set()
 

@@ -1,7 +1,7 @@
 local helpers = dofile("tests/helpers.lua")
 local eq = helpers.eq
 
-local history = require("psql.history")
+local history = require("dbsh.history")
 
 -- Redirects the store into a throwaway directory for the whole file, so the
 -- tests never touch the real stdpath("data").

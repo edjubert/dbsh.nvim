@@ -7,7 +7,7 @@ local M = {}
 local LIMIT = 50
 
 function M.dir()
-	return vim.fs.joinpath(vim.fn.stdpath("data"), "psql", "vars")
+	return vim.fs.joinpath(vim.fn.stdpath("data"), "dbsh", "vars")
 end
 
 function M.path(connection)

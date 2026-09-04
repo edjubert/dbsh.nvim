@@ -2,7 +2,7 @@
 -- Never blocks the editor, never prompts for a password: authentication is
 -- delegated to ~/.pgpass through psql's own resolution.
 
-local config = require("psql.config")
+local config = require("dbsh.config")
 
 local M = {}
 

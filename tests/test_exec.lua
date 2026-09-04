@@ -1,8 +1,8 @@
 local helpers = dofile("tests/helpers.lua")
 local eq, expect_match = helpers.eq, helpers.expect_match
 
-local config = require("psql.config")
-local exec = require("psql.exec")
+local config = require("dbsh.config")
+local exec = require("dbsh.exec")
 
 local original_runner
 
