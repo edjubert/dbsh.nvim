@@ -131,4 +131,117 @@ T["rejects an unknown backend"] = function()
 	expect_match(err, "unknown connection type")
 end
 
+local original_runner
+
+T["levels"] = MiniTest.new_set({
+	hooks = {
+		pre_case = function()
+			require("dbsh.config").setup({
+				connections = {
+					local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
+				},
+				default = "local_db",
+			})
+			original_runner = require("dbsh.exec").runner
+		end,
+		post_case = function()
+			local exec = require("dbsh.exec")
+			exec.runner = original_runner
+			exec.slots = { user = nil, introspect = nil }
+		end,
+	},
+})
+
+-- Replaces the runner with one that immediately returns the given output.
+local function stub_output(stdout, code)
+	require("dbsh.exec").runner = function(_, _, on_exit)
+		vim.schedule(function()
+			on_exit({ code = code or 0, stdout = stdout, stderr = code == 0 and "" or "boom" })
+		end)
+		return { kill = function() end }
+	end
+end
+
+T["levels"]["declares database, schema and relation"] = function()
+	eq(#postgres.levels, 3)
+	eq(postgres.levels[1].key, "database")
+	eq(postgres.levels[1].command, "Databases")
+	eq(postgres.levels[1].on_select, "set_level")
+	eq(postgres.levels[2].key, "schema")
+	eq(postgres.levels[2].command, "Schemas")
+	eq(postgres.levels[2].on_select, "descend")
+	eq(postgres.levels[3].key, "relation")
+	eq(postgres.levels[3].command, "Tables")
+	eq(type(postgres.levels[3].on_select), "function")
+end
+
+T["levels"]["lists databases as plain entries"] = function()
+	stub_output("postgres\nanalytics\n")
+	local got
+	postgres.levels[1].list({}, function(items) got = items end)
+	vim.wait(500, function() return got ~= nil end)
+	eq(got, {
+		{ value = "postgres", display = "postgres", ordinal = "postgres" },
+		{ value = "analytics", display = "analytics", ordinal = "analytics" },
+	})
+end
+
+T["levels"]["lists schemas as plain entries"] = function()
+	stub_output("public\nanalytics\n")
+	local got
+	postgres.levels[2].list({}, function(items) got = items end)
+	vim.wait(500, function() return got ~= nil end)
+	eq(#got, 2)
+	eq(got[1].value, "public")
+end
+
+T["levels"]["lists relations with their schema, name and kind"] = function()
+	stub_output("public\tusers\tr\nanalytics\tevents\tv\n")
+	local got
+	postgres.levels[3].list({}, function(items) got = items end)
+	vim.wait(500, function() return got ~= nil end)
+	eq(#got, 2)
+	eq(got[1].value, { schema = "public", name = "users", kind = "r" })
+	eq(got[1].ordinal, "public.users")
+	expect_match(got[1].display, "table")
+	expect_match(got[2].display, "view")
+end
+
+T["levels"]["filters relations by the schema in the context"] = function()
+	stub_output("public\tusers\tr\nanalytics\tevents\tv\n")
+	local got
+	postgres.levels[3].list({ schema = "analytics" }, function(items) got = items end)
+	vim.wait(500, function() return got ~= nil end)
+	eq(#got, 1)
+	eq(got[1].value.name, "events")
+end
+
+T["levels"]["surfaces the error when the CLI fails"] = function()
+	stub_output("", 2)
+	local err
+	postgres.levels[1].list({}, function(_, e) err = e end)
+	vim.wait(500, function() return err ~= nil end)
+	expect_match(err, "boom")
+end
+
+T["levels"]["labels every supported relkind"] = function()
+	eq(postgres.kind_label("r"), "table")
+	eq(postgres.kind_label("v"), "view")
+	eq(postgres.kind_label("m"), "matview")
+	eq(postgres.kind_label("p"), "partitioned")
+	eq(postgres.kind_label("x"), "x")
+end
+
+T["levels"]["previews the selected relation"] = function()
+	local dbsh = require("dbsh")
+	local original = dbsh.query
+	local asked
+	dbsh.query = function(sql) asked = sql end
+
+	postgres.levels[3].on_select({ schema = "public", name = "users" }, {})
+
+	dbsh.query = original
+	eq(asked, 'SELECT * FROM "public"."users" LIMIT 10;')
+end
+
 return T

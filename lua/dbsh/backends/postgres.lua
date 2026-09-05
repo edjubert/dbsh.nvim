@@ -140,4 +140,99 @@ M.queries = {
 	}, "\n"),
 }
 
+-- Deferred require: dbsh.exec requires dbsh.config, which requires the backend
+-- registry, which requires this module. Requiring it at load time would close
+-- that cycle.
+local function fetch(sql, callback)
+	local exec = require("dbsh.exec")
+	-- Its own slot, so opening a picker never cancels a running user query.
+	exec.run(sql, { mode = "raw", slot = "introspect" }, function(code, stdout, stderr)
+		if code ~= 0 then
+			callback(nil, stderr ~= "" and stderr or "psql exited with code " .. tostring(code))
+			return
+		end
+		callback(M.parse_raw(stdout), nil)
+	end)
+end
+
+local KINDS = {
+	r = "table",
+	v = "view",
+	m = "matview",
+	p = "partitioned",
+}
+
+function M.kind_label(relkind)
+	return KINDS[relkind] or relkind
+end
+
+local function list_names(sql, callback)
+	fetch(sql, function(rows, err)
+		if err ~= nil then
+			callback(nil, err)
+			return
+		end
+		local items = {}
+		for _, row in ipairs(rows) do
+			table.insert(items, { value = row[1], display = row[1], ordinal = row[1] })
+		end
+		callback(items, nil)
+	end)
+end
+
+-- ctx carries the values already chosen for the levels above. Without a
+-- schema this lists every relation, which is what the flat picker does.
+local function list_relations(ctx, callback)
+	fetch(M.queries.tables, function(rows, err)
+		if err ~= nil then
+			callback(nil, err)
+			return
+		end
+		local items = {}
+		for _, row in ipairs(rows) do
+			local schema, name, kind = row[1], row[2], row[3]
+			if ctx.schema == nil or ctx.schema == schema then
+				local label = string.format("%s.%s", schema, name)
+				table.insert(items, {
+					value = { schema = schema, name = name, kind = kind },
+					display = string.format("%s  [%s]", label, M.kind_label(kind)),
+					ordinal = label,
+				})
+			end
+		end
+		callback(items, nil)
+	end)
+end
+
+-- The catalog hierarchy, from the top down. Each level says how to list it and
+-- what selecting an item does; the user commands are named after `command`.
+M.levels = {
+	{
+		key = "database",
+		command = "Databases",
+		on_select = "set_level",
+		list = function(_, callback)
+			list_names(M.queries.databases, callback)
+		end,
+	},
+	{
+		key = "schema",
+		command = "Schemas",
+		on_select = "descend",
+		list = function(_, callback)
+			list_names(M.queries.schemas, callback)
+		end,
+	},
+	{
+		key = "relation",
+		command = "Tables",
+		list = list_relations,
+		-- Deferred require: dbsh requires the pickers, which reach this leaf.
+		on_select = function(item)
+			local config = require("dbsh.config")
+			require("dbsh").query(M.preview_query(item, config.options().preview_limit))
+		end,
+	},
+}
+
 return M
