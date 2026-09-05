@@ -45,25 +45,6 @@ T["rejects an unknown connection"] = function()
 	expect_match(err, "unknown connection")
 end
 
-T["switching database does not mutate the declared connection"] = function()
-	config.set_database("analytics")
-	eq(config.current().database, "analytics")
-	eq(config.options().connections.local_db.database, "postgres")
-end
-
-T["bumps the generation when switching database"] = function()
-	local before = config.generation()
-	config.set_database("analytics")
-	eq(config.generation() > before, true)
-end
-
-T["reports an error when switching database with no connection"] = function()
-	config.setup({ connections = {} })
-	local conn, err = config.set_database("analytics")
-	eq(conn, nil)
-	expect_match(err, "no current connection")
-end
-
 T["applies csv export defaults"] = function()
 	eq(config.options().csv_delimiter, ",")
 	eq(

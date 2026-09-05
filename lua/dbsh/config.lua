@@ -97,7 +97,7 @@ function M.set_connection(name)
 	if conn == nil then
 		return nil, string.format("unknown connection '%s'", name)
 	end
-	-- Work on a copy so that set_database never mutates the declared table.
+	-- Work on a copy so that set_level never mutates the declared table.
 	M.state.current = vim.deepcopy(conn)
 	M.state.current_name = name
 	M.state.generation = M.state.generation + 1
@@ -114,11 +114,6 @@ function M.set_level(key, value)
 	M.state.current[key] = value
 	M.state.generation = M.state.generation + 1
 	return M.state.current
-end
-
--- Kept until every caller goes through set_level. Removed in a later commit.
-function M.set_database(dbname)
-	return M.set_level("database", dbname)
 end
 
 return M

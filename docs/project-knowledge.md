@@ -5,8 +5,22 @@ Il décrit le plugin tel qu'il est, et servira de référence aux chantiers à v
 
 ## Ce que fait le plugin
 
-psql.nvim pilote le CLI `psql` en sous-processus depuis un buffer Neovim.
+dbsh.nvim pilote un shell de base de données en sous-processus depuis un buffer Neovim.
+Le shell est une propriété de la connexion : aujourd'hui c'est `psql`, piloté par le backend `postgres`.
 Il ne contient aucun driver : la connexion, l'authentification et le rendu du tableau sont délégués au CLI.
+Ses modules vivent sous `lua/dbsh/`, ses messages utilisateur sont préfixés `dbsh.nvim: `, ses données sous `stdpath("data")/dbsh/`.
+
+## Backends
+
+Un backend est une table de données et de fonctions, **sans état**, sous `lua/dbsh/backends/<nom>.lua`, enregistrée dans `lua/dbsh/backends/init.lua`.
+Il déclare `name`, `shape`, `filetype`, `extension`, `table_border`, `argv`, `env`, `preamble`, `parse_raw`, `variable_preamble`, `export_query`, `preview_query`, `levels`.
+**La dépendance ne va que dans un sens** : `config` requiert le registre, un backend ne requiert jamais `config`, et les fonctions qui ont besoin d'une valeur de configuration la reçoivent en paramètre (`env(conn, options)`, `preview_query(item, limit)`).
+`levels[].list` a besoin d'`exec` et fait donc son `require` **dans le corps** de la fonction.
+
+## Navigation
+
+La hiérarchie de catalogue est la liste `backend.levels` ; chaque niveau porte `key`, `command`, `list(ctx, callback)` et `on_select` (`"set_level"`, `"descend"`, ou une fonction).
+Les commandes `:Db<command>` sont générées depuis cette liste par `dbsh.init` et redéclarées sur l'évènement `User DbshConnectionChanged`.
 
 ## Runtime
 
@@ -23,24 +37,25 @@ Les `require` de tête sont en haut du fichier, sauf en cas de cycle où le `req
 
 Tabulations pour l'indentation, aucun formateur configuré.
 Commentaires et identifiants en anglais.
-**Un commentaire explique pourquoi, jamais quoi** — par exemple, dans `exec.build_argv` : `-X ignores ~/.psqlrc, -w never prompts for a password`.
+**Un commentaire explique pourquoi, jamais quoi** — par exemple, dans `backends/postgres.lua` : `-X ignores ~/.psqlrc, -w never prompts for a password`.
 
 ## Gestion d'erreur
 
 Jamais d'`error()` sur un chemin utilisateur.
 Synchrones : `return nil, err`.
 Asynchrones : `callback(nil, err)` pour l'introspection et l'export, `callback(code, stdout, stderr)` pour `exec.run`.
-Les messages utilisateur passent par `vim.notify` et sont préfixés `psql.nvim: `.
+Les messages utilisateur passent par `vim.notify` et sont préfixés `dbsh.nvim: `.
 Un store JSON corrompu ou absent est traité comme vide et ne fait jamais échouer une requête (cf. `history.load`).
 
 ## État
 
 L'état vit dans deux modules et nulle part ailleurs : `config.state` (connexions déclarées, connexion courante, `generation`) et `exec.slots` (un processus en vol par slot, `user` et `introspect`).
 Le compteur `generation` est une garde d'annulation : un résultat qui revient après un changement de connexion est jeté.
+`config.backend()` résout le backend de la connexion courante ; `config.set_level(key, value)` fixe un niveau de navigation (par exemple `database`) sans toucher aux connexions déclarées.
 
 ## Persistance
 
-Tout ce qui persiste vit sous `vim.fn.stdpath("data")/psql/` : `exports/` (CSV), `vars/<connexion>.json` (historique des variables), `<connexion>.sql` (scratchpad).
+Tout ce qui persiste vit sous `vim.fn.stdpath("data")/dbsh/` : `exports/` (CSV), `vars/<connexion>.json` (historique des variables), `<connexion>.sql` (scratchpad).
 `vim.fn.mkdir(dir, "p")` avant toute écriture.
 
 ## Tests
