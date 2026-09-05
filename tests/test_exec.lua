@@ -3,6 +3,7 @@ local eq, expect_match = helpers.eq, helpers.expect_match
 
 local config = require("dbsh.config")
 local exec = require("dbsh.exec")
+local postgres = require("dbsh.backends.postgres")
 
 local original_runner
 
@@ -24,47 +25,6 @@ local T = MiniTest.new_set({
 		end,
 	},
 })
-
-T["builds a pretty argv without password flags"] = function()
-	local argv = exec.build_argv(config.current(), "/tmp/script.sql", false)
-	eq(argv, {
-		"psql", "-X", "-w",
-		"-h", "localhost",
-		"-p", "5432",
-		"-U", "dev",
-		"-d", "postgres",
-		"-f", "/tmp/script.sql",
-	})
-end
-
-T["adds unaligned tuple flags in raw mode"] = function()
-	local argv = exec.build_argv(config.current(), "/tmp/script.sql", true)
-	eq(argv, {
-		"psql", "-X", "-w",
-		"-h", "localhost",
-		"-p", "5432",
-		"-U", "dev",
-		"-d", "postgres",
-		"-A", "-t", "-F", "\t",
-		"-f", "/tmp/script.sql",
-	})
-end
-
-T["writes the display preamble before the query in pretty mode"] = function()
-	local path = exec.write_script("SELECT 1;", false)
-	local content = table.concat(vim.fn.readfile(path), "\n")
-	os.remove(path)
-	expect_match(content, "\\pset border 2")
-	expect_match(content, "SELECT 1;")
-end
-
-T["writes no display preamble in raw mode"] = function()
-	local path = exec.write_script("SELECT 1;", true)
-	local content = table.concat(vim.fn.readfile(path), "\n")
-	os.remove(path)
-	eq(content:find("pset border", 1, true), nil)
-	expect_match(content, "ON_ERROR_STOP")
-end
 
 T["passes PGCONNECT_TIMEOUT and never PGPASSWORD"] = function()
 	local captured_opts
@@ -128,6 +88,66 @@ T["cancels the previous query in the same slot only"] = function()
 	eq(#killed, 0)
 	exec.run("SELECT 3;", { slot = "user" }, function() end)
 	eq(#killed, 1)
+end
+
+T["writes the backend preamble before the query"] = function()
+	local path = exec.write_script(postgres, "SELECT 1;", "pretty")
+	local content = table.concat(vim.fn.readfile(path), "\n")
+	os.remove(path)
+	expect_match(content, "\\pset border 2")
+	expect_match(content, "SELECT 1;")
+end
+
+T["asks the backend for the raw preamble in raw mode"] = function()
+	local path = exec.write_script(postgres, "SELECT 1;", "raw")
+	local content = table.concat(vim.fn.readfile(path), "\n")
+	os.remove(path)
+	eq(content:find("pset border", 1, true), nil)
+	expect_match(content, "ON_ERROR_STOP")
+end
+
+T["asks the backend for the argv"] = function()
+	local captured
+	exec.runner = function(argv, _, _)
+		captured = argv
+		return { kill = function() end }
+	end
+	exec.run("SELECT 1;", {}, function() end)
+	eq(captured[1], "psql")
+	eq(vim.tbl_contains(captured, "-A"), false)
+end
+
+T["passes the raw mode down to the backend argv"] = function()
+	local captured
+	exec.runner = function(argv, _, _)
+		captured = argv
+		return { kill = function() end }
+	end
+	exec.run("SELECT 1;", { mode = "raw" }, function() end)
+	eq(vim.tbl_contains(captured, "-A"), true)
+end
+
+T["still honours the transitional raw flag"] = function()
+	local captured
+	exec.runner = function(argv, _, _)
+		captured = argv
+		return { kill = function() end }
+	end
+	exec.run("SELECT 1;", { raw = true }, function() end)
+	eq(vim.tbl_contains(captured, "-A"), true)
+end
+
+T["reports an error when the connection type has no backend"] = function()
+	config.setup({
+		connections = { weird = { type = "oracle", host = "h", port = 1, database = "d", username = "u" } },
+		default = "weird",
+	})
+	local code, stderr
+	exec.run("SELECT 1;", {}, function(c, _, e)
+		code, stderr = c, e
+	end)
+	eq(code, 1)
+	expect_match(stderr, "unknown connection type")
 end
 
 return T
