@@ -164,20 +164,6 @@ function M.level(index, ctx)
 	end)
 end
 
--- Transitional wrappers, kept until dbsh.init generates its commands from
--- backend.levels. The hard-coded indexes go away with them.
-function M.databases()
-	M.level(1, {})
-end
-
-function M.schemas()
-	M.level(2, {})
-end
-
-function M.tables(opts)
-	M.level(3, opts or {})
-end
-
 -- Asks for the value of a SQL variable. The prompt doubles as the input
 -- field: <CR> takes the highlighted entry when there is one, the typed text
 -- otherwise, and <C-e> always takes the typed text -- without it a value

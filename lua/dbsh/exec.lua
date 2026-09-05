@@ -13,15 +13,6 @@ M.runner = vim.system
 -- One in-flight handle per slot, so opening a picker does not cancel a user query.
 M.slots = { user = nil, introspect = nil }
 
--- Transitional: opts.raw is the boolean the pre-backend callers still pass.
--- Removed once every caller states its mode.
-local function mode_of(opts)
-	if opts.mode ~= nil then
-		return opts.mode
-	end
-	return opts.raw and "raw" or "pretty"
-end
-
 function M.write_script(backend, sql, mode)
 	local path = os.tmpname()
 	local fd = assert(io.open(path, "w"))
@@ -66,7 +57,7 @@ function M.run(sql, opts, callback)
 
 	M.cancel(slot)
 
-	local mode = mode_of(opts)
+	local mode = opts.mode or "pretty"
 	local generation = config.generation()
 	local tmpfile = M.write_script(backend, sql, mode)
 

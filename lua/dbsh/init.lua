@@ -21,7 +21,7 @@ end
 function M.query(sql)
 	sql = vim.trim(sql or "")
 	if sql == "" then
-		vim.notify("psql.nvim: query is empty", vim.log.levels.WARN)
+		vim.notify("dbsh.nvim: query is empty", vim.log.levels.WARN)
 		return
 	end
 
@@ -112,7 +112,7 @@ function M.yank_csv()
 	local mode = vim.fn.mode()
 	if mode ~= csv.LINEWISE and mode ~= csv.BLOCKWISE then
 		vim.notify(
-			"psql.nvim: select lines with V or a block with <C-v> first",
+			"dbsh.nvim: select lines with V or a block with <C-v> first",
 			vim.log.levels.WARN
 		)
 		return
@@ -136,7 +136,7 @@ function M.yank_csv()
 		math.max(from[3], to[3])
 	)
 	if #rows == 0 then
-		vim.notify("psql.nvim: no table cell in the selection", vim.log.levels.WARN)
+		vim.notify("dbsh.nvim: no table cell in the selection", vim.log.levels.WARN)
 		return
 	end
 
@@ -144,7 +144,7 @@ function M.yank_csv()
 	for _, name in ipairs(M.yank_registers(vim.o.clipboard)) do
 		vim.fn.setreg(name, text)
 	end
-	vim.notify(string.format("psql.nvim: yanked %d row(s) as CSV", #rows))
+	vim.notify(string.format("dbsh.nvim: yanked %d row(s) as CSV", #rows))
 end
 
 -- The result buffer exports the query it is showing. Any other buffer
@@ -170,7 +170,7 @@ end
 function M.export_csv(opts)
 	local sql = vim.trim(query_to_export(opts) or "")
 	if sql == "" then
-		vim.notify("psql.nvim: nothing to export", vim.log.levels.WARN)
+		vim.notify("dbsh.nvim: nothing to export", vim.log.levels.WARN)
 		return
 	end
 
@@ -202,7 +202,7 @@ function M.export_csv(opts)
 						vim.notify("dbsh.nvim: " .. err, vim.log.levels.ERROR)
 						return
 					end
-					vim.notify("psql.nvim: exported to " .. written)
+					vim.notify("dbsh.nvim: exported to " .. written)
 				end)
 			end
 		)

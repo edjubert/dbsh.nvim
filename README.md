@@ -149,7 +149,7 @@ If a password prompt appears, `~/.pgpass` is being ignored — see
 ```lua
 require("dbsh").setup({
 	connections = {
-		local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
+		local_db = { type = "postgres", host = "localhost", port = 5432, database = "postgres", username = "dev" },
 	},
 	default = "local_db",
 	connect_timeout = 5,
@@ -164,7 +164,7 @@ require("dbsh").setup({
 
 | Option | Default | Meaning |
 |---|---|---|
-| `connections` | `{}` | Named connections. Each has exactly `host`, `port`, `database`, `username`. |
+| `connections` | `{}` | Named connections. `type` names the backend driving it and defaults to `"postgres"`; a postgres connection then needs `host`, `port`, `database`, `username`. |
 | `default` | `nil` | Connection selected at startup. Falls back to any declared one. |
 | `connect_timeout` | `5` | `PGCONNECT_TIMEOUT`, in seconds. |
 | `query_timeout` | `30000` | Kills a runaway query, in milliseconds. |
@@ -201,14 +201,25 @@ unexpected password prompt, and it is the single most common setup mistake.
 | Command | Description |
 |---|---|
 | `:DbConnections` | pick a connection |
-| `:DbDatabases` | pick a database on the current server |
-| `:DbSchemas` | pick a schema, then drill into its tables |
-| `:DbTables` | pick any table, as a flat `schema.table` list |
 | `:DbTemp` | open the scratchpad of the current connection |
 | `:DbToggleResults` | toggle the result window closed or open, keeping its content |
 | `:DbExportCSV` | export a query result to a CSV file — accepts a range |
 | `:DbCancel` | cancel the running query |
 | `:DbInfo` | show the current connection and database |
+
+The catalog commands are declared by the backend of the current connection, not
+by the plugin, and are redeclared whenever you switch connection. A postgres
+connection gives you:
+
+| Command | Description |
+|---|---|
+| `:DbDatabases` | pick a database on the current server |
+| `:DbSchemas` | pick a schema, then drill into its tables |
+| `:DbTables` | pick any table, as a flat `schema.table` list |
+
+A backend with a different hierarchy declares different commands, and the ones
+that do not apply simply do not exist — completion only offers what makes sense
+for the connection you are on.
 
 ## Lua API
 
@@ -318,8 +329,29 @@ Selecting a table runs `SELECT * FROM "schema"."table" LIMIT 10;`, with the limi
 taken from `preview_limit`. Identifiers are quoted, so mixed-case names and
 reserved words survive.
 
-Introspection runs on its own execution slot, which means opening a picker never
-cancels a query you are waiting on.
+Catalog navigation is generic: the backend declares an ordered list of levels,
+and the plugin renders each of them with the same picker. `<BS>` walks back up
+that list. Introspection runs on its own execution slot, which means opening a
+picker never cancels a query you are waiting on.
+
+## Backends
+
+The plugin drives a database shell as a subprocess; which shell it drives is a
+property of the connection:
+
+```lua
+connections = {
+	local_db = { type = "postgres", host = "localhost", port = 5432, database = "postgres", username = "dev" },
+}
+```
+
+`type` defaults to `"postgres"`, which is the only backend implemented today. A
+backend is a small table under `lua/dbsh/backends/`: it says how to build the
+CLI invocation, what preamble to write, how to parse raw output, how to declare
+a query variable, how to export CSV, and which navigation levels its catalog
+has. Everything else — the result buffer, the CSV yank, the scratchpad, the
+variable prompts, the export file handling — is shared and knows nothing about
+any particular database.
 
 ## Scratchpad
 

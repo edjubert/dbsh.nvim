@@ -127,16 +127,6 @@ T["passes the raw mode down to the backend argv"] = function()
 	eq(vim.tbl_contains(captured, "-A"), true)
 end
 
-T["still honours the transitional raw flag"] = function()
-	local captured
-	exec.runner = function(argv, _, _)
-		captured = argv
-		return { kill = function() end }
-	end
-	exec.run("SELECT 1;", { raw = true }, function() end)
-	eq(vim.tbl_contains(captured, "-A"), true)
-end
-
 T["reports an error when the connection type has no backend"] = function()
 	config.setup({
 		connections = { weird = { type = "oracle", host = "h", port = 1, database = "d", username = "u" } },
