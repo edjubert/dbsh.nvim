@@ -1,8 +1,6 @@
 -- CSV file export.
--- COPY ... TO STDOUT is used instead of the COPY meta-command: psql
--- meta-commands are line-oriented, which breaks on multi-line queries, and
--- COPY ... TO '<file>' would need a superuser right and write server side.
--- The file itself is therefore written by Neovim.
+-- The file is written by Neovim, not by the server: the backend only says
+-- which query makes its CLI print CSV on stdout, and we save what comes back.
 
 local config = require("dbsh.config")
 local exec = require("dbsh.exec")
@@ -34,17 +32,6 @@ function M.default_path(dir, base, date)
 	return M.free_path(vim.fs.joinpath(dir, string.format("%s_%s.csv", date, base)))
 end
 
--- The inner query must not carry its trailing semicolon: COPY (SELECT 1;)
--- is a syntax error.
-function M.copy_query(sql, delimiter)
-	local inner = (vim.trim(sql):gsub(";%s*$", ""))
-	return string.format(
-		"COPY (%s) TO STDOUT WITH (FORMAT CSV, HEADER, DELIMITER '%s');",
-		inner,
-		delimiter
-	)
-end
-
 function M.write(path, contents)
 	local fd, err = io.open(path, "w")
 	if fd == nil then
@@ -55,14 +42,20 @@ function M.write(path, contents)
 	return path, nil
 end
 
--- preamble holds psql directives (\set ...) that must run before the COPY
--- statement, never inside its parentheses. callback(path, err)
+-- preamble holds the backend directives declaring the query variables; they
+-- must run before the export query, never inside it. callback(path, err)
 function M.run(sql, path, preamble, callback)
-	local query = M.copy_query(sql, config.options().csv_delimiter)
-	-- Raw mode: no \timing, no decoration, so stdout is the CSV itself.
-	exec.run((preamble or "") .. query, { raw = true }, function(code, stdout, stderr)
+	local backend, err = config.backend()
+	if backend == nil then
+		callback(nil, err)
+		return
+	end
+
+	local query = backend.export_query(sql, config.options().csv_delimiter)
+	-- Raw mode: no decoration, so stdout is the CSV itself.
+	exec.run((preamble or "") .. query, { mode = "raw" }, function(code, stdout, stderr)
 		if code ~= 0 then
-			callback(nil, stderr ~= "" and stderr or "psql exited with code " .. tostring(code))
+			callback(nil, stderr ~= "" and stderr or "the query exited with code " .. tostring(code))
 			return
 		end
 		callback(M.write(path, stdout))

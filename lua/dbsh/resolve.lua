@@ -1,5 +1,5 @@
--- Turns the variables found in a query into a psql \set preamble, asking
--- the user for each value it does not have yet.
+-- Turns the variables found in a query into the preamble its backend uses to
+-- declare them, asking the user for each value it does not have yet.
 
 local config = require("dbsh.config")
 local history = require("dbsh.history")
@@ -29,7 +29,13 @@ function M.preamble(sql, callback)
 
 	local function ask(index)
 		if index > #names then
-			callback(variables.preamble(names, values))
+			local backend, err = config.backend()
+			if backend == nil then
+				vim.notify("dbsh.nvim: " .. err, vim.log.levels.ERROR)
+				callback(nil)
+				return
+			end
+			callback(backend.variable_preamble(names, values))
 			return
 		end
 
