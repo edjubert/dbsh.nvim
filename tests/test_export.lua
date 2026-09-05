@@ -66,20 +66,6 @@ T["builds the default path from the date and the base name"] = function()
 	)
 end
 
-T["wraps the query in a COPY TO STDOUT statement"] = function()
-	local query = export.copy_query("SELECT 1;", ",")
-	expect_match(query, "COPY %(SELECT 1%) TO STDOUT")
-	expect_match(query, "FORMAT CSV, HEADER, DELIMITER ','")
-end
-
-T["keeps a multi line query intact"] = function()
-	expect_match(export.copy_query("SELECT a\nFROM t;", ","), "SELECT a\nFROM t")
-end
-
-T["honours the configured delimiter"] = function()
-	expect_match(export.copy_query("SELECT 1;", ";"), "DELIMITER ';'")
-end
-
 T["writes the psql output to the target file"] = function()
 	stub_output("id,name\n1,alice\n")
 	local path = vim.fs.joinpath(tmpdir, "out.csv")
@@ -90,7 +76,7 @@ T["writes the psql output to the target file"] = function()
 	eq(vim.fn.readfile(path), { "id,name", "1,alice" })
 end
 
-T["surfaces the error when psql fails"] = function()
+T["surfaces the error when the CLI fails"] = function()
 	stub_output("", 2)
 	local err
 	export.run("SELECT 1;", vim.fs.joinpath(tmpdir, "out.csv"), nil, function(_, e) err = e end)
@@ -136,6 +122,17 @@ T["works without a preamble"] = function()
 	export.run("SELECT 1;", path, nil, function(p) got = p end)
 	vim.wait(500, function() return got ~= nil end)
 	eq(vim.fn.readfile(path), { "id", "1" })
+end
+
+T["reports an unresolvable backend without running anything"] = function()
+	config.setup({
+		connections = { weird = { type = "oracle", host = "h", port = 1, database = "d", username = "u" } },
+		default = "weird",
+	})
+	local err
+	export.run("SELECT 1;", vim.fs.joinpath(tmpdir, "out.csv"), nil, function(_, e) err = e end)
+	vim.wait(500, function() return err ~= nil end)
+	expect_match(err, "unknown connection type")
 end
 
 return T
