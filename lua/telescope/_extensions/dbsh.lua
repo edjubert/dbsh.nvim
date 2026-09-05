@@ -14,14 +14,12 @@ return telescope.register_extension({
 		connections = function()
 			require("dbsh.telescope.pickers").connections()
 		end,
-		databases = function()
-			require("dbsh.telescope.pickers").databases()
-		end,
-		schemas = function()
-			require("dbsh.telescope.pickers").schemas()
-		end,
-		tables = function(opts)
-			require("dbsh.telescope.pickers").tables(opts)
+		-- The catalog levels are declared by the backend, so there is nothing
+		-- to name here: the caller says which level it wants.
+		-- :lua require("telescope").extensions.dbsh.level({ index = 2 })
+		level = function(opts)
+			local index = tonumber(opts and (opts.index or opts.args)) or 1
+			require("dbsh.telescope.pickers").level(index, {})
 		end,
 	},
 })

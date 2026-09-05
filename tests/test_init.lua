@@ -51,13 +51,37 @@ T["handles a paragraph running to the end of the buffer"] = function()
 	eq(stop, 3)
 end
 
-T["declares every user command"] = function()
+T["declares every backend-agnostic command"] = function()
 	for _, name in ipairs({
-		"DbConnections", "DbDatabases", "DbSchemas",
-		"DbTables", "DbTemp", "DbCancel", "DbInfo",
+		"DbConnections", "DbTemp", "DbCancel", "DbToggleResults", "DbInfo",
 	}) do
 		eq(vim.fn.exists(":" .. name), 2)
 	end
+end
+
+T["generates one command per level the backend declares"] = function()
+	for _, name in ipairs({ "DbDatabases", "DbSchemas", "DbTables" }) do
+		eq(vim.fn.exists(":" .. name), 2)
+	end
+end
+
+T["drops the catalog commands of a connection with no backend"] = function()
+	local config = require("dbsh.config")
+	dbsh.setup({
+		connections = {
+			local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
+			weird = { type = "oracle", host = "h", port = 1, database = "d", username = "u" },
+		},
+		default = "local_db",
+	})
+	eq(vim.fn.exists(":DbTables"), 2)
+
+	config.set_connection("weird")
+	eq(vim.fn.exists(":DbTables"), 0)
+
+	-- And they come back when a usable connection does.
+	config.set_connection("local_db")
+	eq(vim.fn.exists(":DbTables"), 2)
 end
 
 T["refuses an empty query"] = function()
