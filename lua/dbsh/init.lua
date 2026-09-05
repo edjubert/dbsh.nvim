@@ -214,20 +214,45 @@ local function pickers()
 	return require("dbsh.telescope.pickers")
 end
 
+-- Names of the catalog commands currently declared, so a connection change can
+-- take them down before putting the new ones up.
+local level_commands = {}
+
+-- The catalog is backend-specific: a Mongo connection has no schema level, and
+-- offering :DbSchemas there would only produce an empty picker. So the commands
+-- are derived from what the backend declares, and redeclared when it changes.
+local function declare_level_commands()
+	for _, name in ipairs(level_commands) do
+		-- pcall: deleting a command that is not declared raises.
+		pcall(vim.api.nvim_del_user_command, name)
+	end
+	level_commands = {}
+
+	local backend = config.backend()
+	if backend == nil then
+		return
+	end
+
+	for index, level in ipairs(backend.levels) do
+		local name = "Db" .. level.command
+		vim.api.nvim_create_user_command(name, function()
+			pickers().level(index, {})
+		end, {})
+		table.insert(level_commands, name)
+	end
+end
+
+-- Everything here works the same whatever the connection drives.
 local function declare_commands()
 	local command = vim.api.nvim_create_user_command
 
 	command("DbConnections", function() pickers().connections() end, {})
-	command("DbDatabases", function() pickers().databases() end, {})
-	command("DbSchemas", function() pickers().schemas() end, {})
-	command("DbTables", function() pickers().tables({}) end, {})
-
 	command("DbTemp", function() scratch.open() end, {})
 	command("DbCancel", function() exec.cancel("user") end, {})
 	command("DbToggleResults", function()
 		local ok = results.toggle({ split = config.options().results_split })
 		if not ok then
-			vim.notify("psql.nvim: no result yet", vim.log.levels.WARN)
+			vim.notify("dbsh.nvim: no result yet", vim.log.levels.WARN)
 		end
 	end, {})
 	-- range = true: typing : in visual mode prefills '<,'>, which would
@@ -237,12 +262,12 @@ local function declare_commands()
 	command("DbInfo", function()
 		local name = config.current_name()
 		if name == nil then
-			vim.notify("psql.nvim: no current connection", vim.log.levels.WARN)
+			vim.notify("dbsh.nvim: no current connection", vim.log.levels.WARN)
 			return
 		end
 		local conn = config.current()
 		vim.notify(string.format(
-			"psql.nvim: %s -> %s@%s:%s/%s",
+			"dbsh.nvim: %s -> %s@%s:%s/%s",
 			name, conn.username, conn.host, tostring(conn.port), conn.database))
 	end, {})
 end
@@ -250,6 +275,15 @@ end
 function M.setup(opts)
 	config.setup(opts)
 	declare_commands()
+
+	-- config.setup selects the default connection, and therefore fires the
+	-- event, before this autocommand exists: the first declaration is explicit.
+	vim.api.nvim_create_autocmd("User", {
+		pattern = "DbshConnectionChanged",
+		group = vim.api.nvim_create_augroup("dbsh", { clear = true }),
+		callback = declare_level_commands,
+	})
+	declare_level_commands()
 end
 
 return M

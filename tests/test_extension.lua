@@ -9,12 +9,10 @@ T["loads without telescope installed and exports nothing"] = function()
 	eq(extension.exports, nil)
 end
 
-T["declares the four pickers in its exports table"] = function()
+T["declares the connection and level pickers in its exports table"] = function()
 	local source = table.concat(vim.fn.readfile("lua/telescope/_extensions/dbsh.lua"), "\n")
 	expect_match(source, "connections")
-	expect_match(source, "databases")
-	expect_match(source, "schemas")
-	expect_match(source, "tables")
+	expect_match(source, "level")
 end
 
 T["guards against a missing telescope"] = function()
