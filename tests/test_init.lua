@@ -1,17 +1,17 @@
 local helpers = dofile("tests/helpers.lua")
 local eq, expect_match = helpers.eq, helpers.expect_match
 
-local psql = require("psql")
-local exec = require("psql.exec")
-local results = require("psql.results")
-local csv = require("psql.csv")
+local dbsh = require("dbsh")
+local exec = require("dbsh.exec")
+local results = require("dbsh.results")
+local csv = require("dbsh.csv")
 
 local original_runner
 
 local T = MiniTest.new_set({
 	hooks = {
 		pre_case = function()
-			psql.setup({
+			dbsh.setup({
 				connections = {
 					local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
 				},
@@ -32,39 +32,63 @@ local T = MiniTest.new_set({
 
 T["finds the paragraph around the cursor line"] = function()
 	local lines = { "one", "", "SELECT 1", "FROM t;", "", "three" }
-	local start, stop = psql.paragraph_range(lines, 3)
+	local start, stop = dbsh.paragraph_range(lines, 3)
 	eq(start, 3)
 	eq(stop, 4)
 end
 
 T["treats a single line surrounded by blanks as its own paragraph"] = function()
 	local lines = { "", "SELECT 1;", "" }
-	local start, stop = psql.paragraph_range(lines, 2)
+	local start, stop = dbsh.paragraph_range(lines, 2)
 	eq(start, 2)
 	eq(stop, 2)
 end
 
 T["handles a paragraph running to the end of the buffer"] = function()
 	local lines = { "", "SELECT 1", "FROM t;" }
-	local start, stop = psql.paragraph_range(lines, 2)
+	local start, stop = dbsh.paragraph_range(lines, 2)
 	eq(start, 2)
 	eq(stop, 3)
 end
 
-T["declares every user command"] = function()
+T["declares every backend-agnostic command"] = function()
 	for _, name in ipairs({
-		"PSQLConnections", "PSQLDatabases", "PSQLSchemas",
-		"PSQLTables", "PSQLTemp", "PSQLCancel", "PSQLInfo",
+		"DbConnections", "DbTemp", "DbCancel", "DbToggleResults", "DbInfo",
 	}) do
 		eq(vim.fn.exists(":" .. name), 2)
 	end
+end
+
+T["generates one command per level the backend declares"] = function()
+	for _, name in ipairs({ "DbDatabases", "DbSchemas", "DbTables" }) do
+		eq(vim.fn.exists(":" .. name), 2)
+	end
+end
+
+T["drops the catalog commands of a connection with no backend"] = function()
+	local config = require("dbsh.config")
+	dbsh.setup({
+		connections = {
+			local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
+			weird = { type = "oracle", host = "h", port = 1, database = "d", username = "u" },
+		},
+		default = "local_db",
+	})
+	eq(vim.fn.exists(":DbTables"), 2)
+
+	config.set_connection("weird")
+	eq(vim.fn.exists(":DbTables"), 0)
+
+	-- And they come back when a usable connection does.
+	config.set_connection("local_db")
+	eq(vim.fn.exists(":DbTables"), 2)
 end
 
 T["refuses an empty query"] = function()
 	local notified
 	local original_notify = vim.notify
 	vim.notify = function(msg) notified = msg end
-	psql.query("   ")
+	dbsh.query("   ")
 	vim.notify = original_notify
 	expect_match(notified, "empty")
 end
@@ -77,7 +101,7 @@ T["renders successful output in the result buffer"] = function()
 		return { kill = function() end }
 	end
 
-	psql.query("SELECT 1;")
+	dbsh.query("SELECT 1;")
 
 	local buf
 	vim.wait(1000, function()
@@ -100,7 +124,7 @@ T["renders stderr when psql fails"] = function()
 		return { kill = function() end }
 	end
 
-	psql.query("SELECT 1;")
+	dbsh.query("SELECT 1;")
 
 	local buf
 	vim.wait(1000, function()
@@ -124,25 +148,25 @@ T["remembers the last executed query"] = function()
 		return { kill = function() end }
 	end
 
-	psql.query("SELECT 42;")
-	vim.wait(1000, function() return psql.last_query() ~= nil end)
-	eq(psql.last_query(), "SELECT 42;")
+	dbsh.query("SELECT 42;")
+	vim.wait(1000, function() return dbsh.last_query() ~= nil end)
+	eq(dbsh.last_query(), "SELECT 42;")
 end
 
 T["does not remember an empty query"] = function()
-	local before = psql.last_query()
+	local before = dbsh.last_query()
 	local original_notify = vim.notify
 	vim.notify = function() end
-	psql.query("   ")
+	dbsh.query("   ")
 	vim.notify = original_notify
-	eq(psql.last_query(), before)
+	eq(dbsh.last_query(), before)
 end
 
 T["refuses to yank csv outside a supported visual mode"] = function()
 	local notified
 	local original_notify = vim.notify
 	vim.notify = function(msg) notified = msg end
-	psql.yank_csv()
+	dbsh.yank_csv()
 	vim.notify = original_notify
 	expect_match(notified, "V")
 end
@@ -161,33 +185,33 @@ T["serializes a rendered table into the default register"] = function()
 end
 
 T["declares the export command"] = function()
-	eq(vim.fn.exists(":PSQLExportCSV"), 2)
+	eq(vim.fn.exists(":DbExportCSV"), 2)
 end
 
 T["yanks to the unnamed register by default"] = function()
-	eq(psql.yank_registers(""), { '"' })
+	eq(dbsh.yank_registers(""), { '"' })
 end
 
 T["also yanks to + when clipboard is unnamedplus"] = function()
-	eq(psql.yank_registers("unnamedplus"), { '"', "+" })
+	eq(dbsh.yank_registers("unnamedplus"), { '"', "+" })
 end
 
 T["also yanks to * when clipboard is unnamed"] = function()
-	eq(psql.yank_registers("unnamed"), { '"', "*" })
+	eq(dbsh.yank_registers("unnamed"), { '"', "*" })
 end
 
 T["honours both clipboard flags at once"] = function()
-	eq(psql.yank_registers("unnamed,unnamedplus"), { '"', "*", "+" })
+	eq(dbsh.yank_registers("unnamed,unnamedplus"), { '"', "*", "+" })
 end
 
 T["accepts a range on the export command"] = function()
 	-- Typing : in visual mode prefills '<,'>, which raises E481 on a
 	-- command declared without a range.
-	eq(vim.api.nvim_get_commands({})["PSQLExportCSV"].range, ".")
+	eq(vim.api.nvim_get_commands({})["DbExportCSV"].range, ".")
 end
 
 T["exports the given range rather than the paragraph"] = function()
-	local export = require("psql.export")
+	local export = require("dbsh.export")
 	local original_run, original_input = export.run, vim.ui.input
 	local captured
 
@@ -205,7 +229,7 @@ T["exports the given range rather than the paragraph"] = function()
 		"SELECT a",
 		"FROM t;",
 	})
-	psql.export_csv({ range = 2, line1 = 2, line2 = 3 })
+	dbsh.export_csv({ range = 2, line1 = 2, line2 = 3 })
 
 	vim.notify = original_notify
 	vim.ui.input = original_input
@@ -215,7 +239,7 @@ T["exports the given range rather than the paragraph"] = function()
 end
 
 T["sends the preamble to psql but renders only the query"] = function()
-	local resolve = require("psql.resolve")
+	local resolve = require("dbsh.resolve")
 	local original_preamble = resolve.preamble
 	resolve.preamble = function(_, cb) cb("\\set raw_data 'public.events'\n") end
 
@@ -233,7 +257,7 @@ T["sends the preamble to psql but renders only the query"] = function()
 		return { kill = function() end }
 	end
 
-	psql.query("SELECT * FROM :raw_data;")
+	dbsh.query("SELECT * FROM :raw_data;")
 
 	local buf
 	vim.wait(1000, function()
@@ -250,7 +274,7 @@ T["sends the preamble to psql but renders only the query"] = function()
 end
 
 T["runs nothing when the variable prompt is cancelled"] = function()
-	local resolve = require("psql.resolve")
+	local resolve = require("dbsh.resolve")
 	local original_preamble = resolve.preamble
 	resolve.preamble = function(_, cb) cb(nil) end
 
@@ -260,7 +284,7 @@ T["runs nothing when the variable prompt is cancelled"] = function()
 		return { kill = function() end }
 	end
 
-	psql.query("SELECT * FROM :raw_data;")
+	dbsh.query("SELECT * FROM :raw_data;")
 	vim.wait(200, function() return ran end)
 
 	resolve.preamble = original_preamble
@@ -268,8 +292,8 @@ T["runs nothing when the variable prompt is cancelled"] = function()
 end
 
 T["hands the preamble to the csv export"] = function()
-	local resolve = require("psql.resolve")
-	local export = require("psql.export")
+	local resolve = require("dbsh.resolve")
+	local export = require("dbsh.export")
 	local original_preamble, original_run = resolve.preamble, export.run
 	local original_input, original_notify = vim.ui.input, vim.notify
 
@@ -283,11 +307,11 @@ T["hands the preamble to the csv export"] = function()
 		cb(path, nil)
 	end
 
-	-- A fresh buffer, so the export never mistakes a leftover __SQL__ for
+	-- A fresh buffer, so the export never mistakes a leftover __DBSH__ for
 	-- the current one and falls back to last_query.
 	vim.api.nvim_set_current_buf(vim.api.nvim_create_buf(true, true))
 	vim.api.nvim_buf_set_lines(0, 0, -1, false, { "SELECT * FROM :raw_data;" })
-	psql.export_csv({ range = 0 })
+	dbsh.export_csv({ range = 0 })
 
 	vim.notify = original_notify
 	vim.ui.input = original_input

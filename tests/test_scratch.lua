@@ -1,8 +1,8 @@
 local helpers = dofile("tests/helpers.lua")
 local eq = helpers.eq
 
-local config = require("psql.config")
-local scratch = require("psql.scratch")
+local config = require("dbsh.config")
+local scratch = require("dbsh.scratch")
 
 local T = MiniTest.new_set({
 	hooks = {
@@ -18,7 +18,7 @@ local T = MiniTest.new_set({
 })
 
 T["stores scratchpads under the data directory"] = function()
-	eq(scratch.dir(), vim.fs.joinpath(vim.fn.stdpath("data"), "psql"))
+	eq(scratch.dir(), vim.fs.joinpath(vim.fn.stdpath("data"), "dbsh"))
 end
 
 T["names the file after the connection"] = function()

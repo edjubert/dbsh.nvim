@@ -1,31 +1,12 @@
--- Telescope pickers for connections, databases, schemas and tables.
+-- Telescope pickers: the connection picker, the generic catalog picker, and
+-- the variable prompt. The catalog levels themselves are declared by the
+-- backend, so this file knows no database vocabulary at all.
 -- Telescope is an optional dependency: every picker degrades to a clear
 -- message when it is not installed.
 
-local config = require("psql.config")
-local introspect = require("psql.introspect")
+local config = require("dbsh.config")
 
 local M = {}
-
-local KINDS = {
-	r = "table",
-	v = "view",
-	m = "matview",
-	p = "partitioned",
-}
-
-function M.kind_label(relkind)
-	return KINDS[relkind] or relkind
-end
-
-function M.format_table_entry(row)
-	local label = string.format("%s.%s", row.schema, row.name)
-	return {
-		value = row,
-		display = string.format("%s  [%s]", label, M.kind_label(row.kind)),
-		ordinal = label,
-	}
-end
 
 -- Injection point: tests replace this to simulate a missing Telescope.
 function M._telescope()
@@ -54,7 +35,7 @@ local function require_telescope()
 end
 
 local function notify_error(err)
-	vim.notify("psql.nvim: " .. err, vim.log.levels.ERROR)
+	vim.notify("dbsh.nvim: " .. err, vim.log.levels.ERROR)
 end
 
 local function open(t, opts)
@@ -93,7 +74,7 @@ function M.connections()
 	end
 
 	open(t, {
-		title = "PSQL connections",
+		title = "dbsh connections",
 		results = config.names(),
 		entry_maker = plain_entry,
 		attach_mappings = function(bufnr, map)
@@ -110,91 +91,71 @@ function M.connections()
 	})
 end
 
-function M.databases()
-	local t = require_telescope()
-	if t == nil then
-		return
-	end
-
-	vim.notify("psql.nvim: fetching databases...")
-	introspect.databases(function(names, err)
+-- on_select is "set_level" (fix this level on the current connection),
+-- "descend" (open the level below with an enriched context), or a function
+-- taking the selected value and the context.
+function M.select(backend, index, ctx, value)
+	local level = backend.levels[index]
+	if level.on_select == "set_level" then
+		local _, err = config.set_level(level.key, value)
 		if err ~= nil then
-			return notify_error(err)
+			notify_error(err)
+		else
+			vim.notify(string.format("dbsh.nvim: using %s %s", level.key, tostring(value)))
 		end
-		open(t, {
-			title = "PSQL databases",
-			results = names,
-			entry_maker = plain_entry,
-			attach_mappings = function(bufnr, map)
-				bind_enter(t, bufnr, map, function(entry)
-					local _, set_err = config.set_database(entry.value)
-					if set_err ~= nil then
-						notify_error(set_err)
-					else
-						vim.notify("psql.nvim: using database " .. entry.value)
-					end
-				end)
-				return true
-			end,
-		})
-	end)
+	elseif level.on_select == "descend" then
+		local down = vim.deepcopy(ctx)
+		down[level.key] = value
+		M.level(index + 1, down)
+	else
+		level.on_select(value, ctx)
+	end
 end
 
-function M.schemas()
+-- index is a position in backend.levels; ctx holds the values already chosen
+-- for the levels above it, e.g. { schema = "public" }.
+function M.level(index, ctx)
+	ctx = ctx or {}
 	local t = require_telescope()
 	if t == nil then
 		return
 	end
 
-	vim.notify("psql.nvim: fetching schemas...")
-	introspect.schemas(function(names, err)
-		if err ~= nil then
-			return notify_error(err)
-		end
-		open(t, {
-			title = "PSQL schemas",
-			results = names,
-			entry_maker = plain_entry,
-			attach_mappings = function(bufnr, map)
-				bind_enter(t, bufnr, map, function(entry)
-					M.tables({ schema = entry.value })
-				end)
-				return true
-			end,
-		})
-	end)
-end
-
--- opts: { schema = string? }. Without a schema this is the flat picker.
-function M.tables(opts)
-	opts = opts or {}
-	local t = require_telescope()
-	if t == nil then
-		return
+	local backend, err = config.backend()
+	if backend == nil then
+		return notify_error(err)
 	end
 
-	vim.notify("psql.nvim: fetching tables...")
-	introspect.tables(opts, function(rows, err)
-		if err ~= nil then
-			return notify_error(err)
+	local level = backend.levels[index]
+	if level == nil then
+		return notify_error(string.format("no level %s on a %s connection", tostring(index), backend.name))
+	end
+
+	vim.notify(string.format("dbsh.nvim: fetching %s...", level.command:lower()))
+	level.list(ctx, function(items, list_err)
+		if list_err ~= nil then
+			return notify_error(list_err)
 		end
 		open(t, {
-			title = opts.schema and ("PSQL tables - " .. opts.schema) or "PSQL tables",
-			results = rows,
-			entry_maker = M.format_table_entry,
+			title = "dbsh " .. level.command:lower(),
+			results = items,
+			-- The backend already shapes each item as a Telescope entry.
+			entry_maker = function(item) return item end,
 			attach_mappings = function(bufnr, map)
 				bind_enter(t, bufnr, map, function(entry)
-					local sql = introspect.preview_query(entry.value.schema, entry.value.name)
-					-- Deferred require: psql.init imports this module.
-					require("psql").query(sql)
+					M.select(backend, index, ctx, entry.value)
 				end)
 
 				-- Normal mode only: mapping <BS> in insert mode would break
-				-- character deletion in the Telescope prompt.
-				if opts.schema ~= nil then
+				-- character deletion in the Telescope prompt. Offered only
+				-- when we actually descended from the level above.
+				local previous = backend.levels[index - 1]
+				if previous ~= nil and ctx[previous.key] ~= nil then
 					map("n", "<BS>", function()
 						t.actions.close(bufnr)
-						M.schemas()
+						local up = vim.deepcopy(ctx)
+						up[previous.key] = nil
+						M.level(index - 1, up)
 					end)
 				end
 				return true
@@ -214,7 +175,7 @@ function M.variable(name, choices, callback)
 	local t = M._telescope()
 	if t == nil then
 		vim.ui.input(
-			{ prompt = "psql variable " .. name .. " = ", default = choices[1] or "" },
+			{ prompt = "dbsh variable " .. name .. " = ", default = choices[1] or "" },
 			callback
 		)
 		return
@@ -232,7 +193,7 @@ function M.variable(name, choices, callback)
 	end
 
 	open(t, {
-		title = "PSQL variable " .. name,
+		title = "dbsh variable " .. name,
 		results = choices,
 		entry_maker = plain_entry,
 		attach_mappings = function(bufnr, map)

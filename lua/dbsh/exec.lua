@@ -1,8 +1,9 @@
--- Asynchronous psql runner.
--- Never blocks the editor, never prompts for a password: authentication is
--- delegated to ~/.pgpass through psql's own resolution.
+-- Asynchronous CLI runner.
+-- Never blocks the editor and never prompts for a password: everything the
+-- invocation needs -- argv, environment, script preamble -- comes from the
+-- backend of the current connection, so this module knows no CLI at all.
 
-local config = require("psql.config")
+local config = require("dbsh.config")
 
 local M = {}
 
@@ -12,39 +13,10 @@ M.runner = vim.system
 -- One in-flight handle per slot, so opening a picker does not cancel a user query.
 M.slots = { user = nil, introspect = nil }
 
-local PRETTY_PREAMBLE = table.concat({
-	"\\set QUIET 1",
-	"\\timing on",
-	"\\pset null (NULL)",
-	"\\pset linestyle unicode",
-	"\\pset border 2",
-}, "\n")
-
-local RAW_PREAMBLE = table.concat({
-	"\\set QUIET 1",
-	"\\set ON_ERROR_STOP 1",
-}, "\n")
-
--- -X ignores ~/.psqlrc, -w never prompts for a password.
-function M.build_argv(conn, tmpfile, raw)
-	local argv = {
-		"psql", "-X", "-w",
-		"-h", conn.host,
-		"-p", tostring(conn.port),
-		"-U", conn.username,
-		"-d", conn.database,
-	}
-	if raw then
-		vim.list_extend(argv, { "-A", "-t", "-F", "\t" })
-	end
-	vim.list_extend(argv, { "-f", tmpfile })
-	return argv
-end
-
-function M.write_script(sql, raw)
+function M.write_script(backend, sql, mode)
 	local path = os.tmpname()
 	local fd = assert(io.open(path, "w"))
-	fd:write(raw and RAW_PREAMBLE or PRETTY_PREAMBLE)
+	fd:write(backend.preamble(mode))
 	fd:write("\n")
 	fd:write(sql)
 	fd:write("\n")
@@ -63,7 +35,7 @@ function M.cancel(slot)
 	end
 end
 
--- opts: { raw = boolean?, slot = "user"|"introspect"?, timeout = number? }
+-- opts: { mode = "pretty"|"raw"?, slot = "user"|"introspect"?, timeout = number? }
 -- callback(code, stdout, stderr)
 function M.run(sql, opts, callback)
 	opts = opts or {}
@@ -71,21 +43,30 @@ function M.run(sql, opts, callback)
 
 	local conn = config.current()
 	if conn == nil then
-		callback(1, "", "psql.nvim: no current connection")
+		callback(1, "", "dbsh.nvim: no current connection")
+		return nil
+	end
+
+	-- Resolved before cancelling anything: killing the running query only to
+	-- fail on a misconfigured connection would help nobody.
+	local backend, err = config.backend()
+	if backend == nil then
+		callback(1, "", "dbsh.nvim: " .. err)
 		return nil
 	end
 
 	M.cancel(slot)
 
+	local mode = opts.mode or "pretty"
 	local generation = config.generation()
-	local tmpfile = M.write_script(sql, opts.raw)
+	local tmpfile = M.write_script(backend, sql, mode)
 
 	local handle = M.runner(
-		M.build_argv(conn, tmpfile, opts.raw),
+		backend.argv(conn, tmpfile, mode),
 		{
 			text = true,
 			timeout = opts.timeout or config.options().query_timeout,
-			env = { PGCONNECT_TIMEOUT = tostring(config.options().connect_timeout) },
+			env = backend.env(conn, config.options()),
 		},
 		vim.schedule_wrap(function(obj)
 			os.remove(tmpfile)

@@ -1,7 +1,7 @@
 local helpers = dofile("tests/helpers.lua")
 local eq = helpers.eq
 
-local float = require("psql.float")
+local float = require("dbsh.float")
 
 local T = MiniTest.new_set({
 	hooks = {

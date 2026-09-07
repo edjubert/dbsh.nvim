@@ -1,12 +1,12 @@
 -- Persistent SQL scratchpad, one file per connection.
 -- A real file on disk, not a scratch buffer, so LSP and formatting work.
 
-local config = require("psql.config")
+local config = require("dbsh.config")
 
 local M = {}
 
 function M.dir()
-	return vim.fs.joinpath(vim.fn.stdpath("data"), "psql")
+	return vim.fs.joinpath(vim.fn.stdpath("data"), "dbsh")
 end
 
 function M.path(name)

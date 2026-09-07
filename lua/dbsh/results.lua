@@ -2,11 +2,11 @@
 -- The buffer is reused across queries, which keeps a history of previous
 -- results, and never soft-wraps: wide tables scroll horizontally instead.
 
-local float = require("psql.float")
+local float = require("dbsh.float")
 
 local M = {}
 
-local BUFNAME = "__SQL__"
+local BUFNAME = "__DBSH__"
 
 function M.find_buf()
 	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
@@ -109,7 +109,7 @@ local function split_lines(text)
 	return vim.split(text or "", "\n", { plain = true })
 end
 
--- A query result never steals focus on its own: only :PSQLToggleResults
+-- A query result never steals focus on its own: only :DbToggleResults
 -- (via M.toggle) does, so typing in a .sql file is never interrupted.
 local function without_focus(opts)
 	return vim.tbl_extend("force", opts or {}, { focus = false })
