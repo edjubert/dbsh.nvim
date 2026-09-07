@@ -1,9 +1,9 @@
 local helpers = dofile("tests/helpers.lua")
 local eq = helpers.eq
 
-local config = require("psql.config")
-local history = require("psql.history")
-local resolve = require("psql.resolve")
+local config = require("dbsh.config")
+local history = require("dbsh.history")
+local resolve = require("dbsh.resolve")
 
 local original_picker
 local original_dir
@@ -91,6 +91,29 @@ T["records an accepted value in the history"] = function()
 	resolve.preamble("SELECT * FROM :raw_data;", function(p) got = p end)
 	vim.wait(500, function() return got ~= nil end)
 	eq(history.values("local_db", "raw_data"), { "public.events" })
+end
+
+T["gives up when the backend cannot be resolved"] = function()
+	config.setup({
+		connections = { weird = { type = "oracle", host = "h", port = 1, database = "d", username = "u" } },
+		default = "weird",
+		variable_patterns = { ":(raw_data)" },
+	})
+	stub_answers({ raw_data = "public.events" })
+
+	local original_notify = vim.notify
+	vim.notify = function() end
+
+	local called = false
+	local got = "untouched"
+	resolve.preamble("SELECT * FROM :raw_data;", function(p)
+		called = true
+		got = p
+	end)
+	vim.wait(500, function() return called end)
+
+	vim.notify = original_notify
+	eq(got, nil)
 end
 
 return T

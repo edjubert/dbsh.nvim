@@ -1,7 +1,7 @@
 local helpers = dofile("tests/helpers.lua")
 local eq = helpers.eq
 
-local results = require("psql.results")
+local results = require("dbsh.results")
 
 local T = MiniTest.new_set({
 	hooks = {
@@ -14,10 +14,10 @@ local T = MiniTest.new_set({
 	},
 })
 
-T["creates a scratch buffer named __SQL__"] = function()
+T["creates a scratch buffer named __DBSH__"] = function()
 	local buf = results.open()
 	eq(vim.api.nvim_buf_is_valid(buf), true)
-	eq(vim.fn.fnamemodify(vim.api.nvim_buf_get_name(buf), ":t"), "__SQL__")
+	eq(vim.fn.fnamemodify(vim.api.nvim_buf_get_name(buf), ":t"), "__DBSH__")
 	eq(vim.bo[buf].buftype, "nofile")
 	eq(vim.bo[buf].filetype, "sql")
 end

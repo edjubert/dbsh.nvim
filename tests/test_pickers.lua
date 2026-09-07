@@ -1,28 +1,10 @@
 local helpers = dofile("tests/helpers.lua")
 local eq, expect_match = helpers.eq, helpers.expect_match
 
-local pickers = require("psql.telescope.pickers")
+local config = require("dbsh.config")
+local pickers = require("dbsh.telescope.pickers")
 
 local T = MiniTest.new_set()
-
-T["labels every supported relkind"] = function()
-	eq(pickers.kind_label("r"), "table")
-	eq(pickers.kind_label("v"), "view")
-	eq(pickers.kind_label("m"), "matview")
-	eq(pickers.kind_label("p"), "partitioned")
-end
-
-T["falls back to the raw relkind when unknown"] = function()
-	eq(pickers.kind_label("x"), "x")
-end
-
-T["formats a table entry as schema.name with its kind"] = function()
-	local entry = pickers.format_table_entry({ schema = "analytics", name = "events", kind = "v" })
-	eq(entry.ordinal, "analytics.events")
-	expect_match(entry.display, "analytics%.events")
-	expect_match(entry.display, "view")
-	eq(entry.value.name, "events")
-end
 
 T["reports a clear error when telescope is unavailable"] = function()
 	local original = pickers._telescope
@@ -183,6 +165,72 @@ T["reports a clear error path for every picker"] = function()
 	vim.ui.input = original_input
 	pickers._telescope = original
 	eq(ok, true)
+end
+
+local function connect()
+	config.setup({
+		connections = {
+			local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
+		},
+		default = "local_db",
+	})
+end
+
+T["reports a level the backend does not declare"] = function()
+	connect()
+	local original = pickers._telescope
+	-- Non-nil so the telescope guard passes; nothing is ever opened, the
+	-- missing level is caught first.
+	pickers._telescope = function() return {} end
+
+	local notified
+	local original_notify = vim.notify
+	vim.notify = function(msg) notified = msg end
+
+	pickers.level(9, {})
+
+	vim.notify = original_notify
+	pickers._telescope = original
+	expect_match(notified, "level")
+end
+
+T["fixes the connection level when selecting a set_level item"] = function()
+	connect()
+	local backend = config.backend()
+	local original_notify = vim.notify
+	vim.notify = function() end
+
+	pickers.select(backend, 1, {}, "analytics")
+
+	vim.notify = original_notify
+	eq(config.current().database, "analytics")
+end
+
+T["descends into the next level with an enriched context"] = function()
+	connect()
+	local backend = config.backend()
+	local original_level = pickers.level
+	local seen
+	pickers.level = function(index, ctx) seen = { index = index, ctx = ctx } end
+
+	pickers.select(backend, 2, {}, "analytics")
+
+	pickers.level = original_level
+	eq(seen, { index = 3, ctx = { schema = "analytics" } })
+end
+
+T["hands the selected item to the leaf handler"] = function()
+	connect()
+	local backend = config.backend()
+	local dbsh = require("dbsh")
+	local original_query = dbsh.query
+	local asked
+	dbsh.query = function(sql) asked = sql end
+
+	pickers.select(backend, 3, {}, { schema = "public", name = "users" })
+
+	dbsh.query = original_query
+	expect_match(asked, "public")
 end
 
 return T

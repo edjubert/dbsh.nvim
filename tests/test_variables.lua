@@ -1,7 +1,7 @@
 local helpers = dofile("tests/helpers.lua")
 local eq = helpers.eq
 
-local variables = require("psql.variables")
+local variables = require("dbsh.variables")
 
 local T = MiniTest.new_set()
 
@@ -28,33 +28,6 @@ T["finds every name matched by a wide pattern"] = function()
 	eq(
 		variables.detect("SELECT :a FROM :b;", { ":([%w_]+)" }),
 		{ "a", "b" }
-	)
-end
-
-T["leaves a plain value untouched"] = function()
-	eq(variables.escape_value("public.events"), "public.events")
-end
-
-T["escapes a single quote"] = function()
-	eq(variables.escape_value("it's"), "it\\'s")
-end
-
-T["escapes a backslash before the quotes"] = function()
-	eq(variables.escape_value("a\\b"), "a\\\\b")
-end
-
-T["builds a set directive"] = function()
-	eq(variables.set_command("raw_data", "public.events"), "\\set raw_data 'public.events'")
-end
-
-T["builds an empty preamble when there is no variable"] = function()
-	eq(variables.preamble({}, {}), "")
-end
-
-T["builds one directive per variable, in order"] = function()
-	eq(
-		variables.preamble({ "a", "b" }, { a = "1", b = "2" }),
-		"\\set a '1'\n\\set b '2'\n"
 	)
 end
 

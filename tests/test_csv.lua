@@ -1,7 +1,7 @@
 local helpers = dofile("tests/helpers.lua")
 local eq = helpers.eq
 
-local csv = require("psql.csv")
+local csv = require("dbsh.csv")
 
 local T = MiniTest.new_set()
 

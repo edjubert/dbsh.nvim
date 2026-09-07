@@ -1,12 +1,12 @@
--- Public API and user commands for psql.nvim.
+-- Public API and user commands for dbsh.nvim.
 
-local config = require("psql.config")
-local exec = require("psql.exec")
-local results = require("psql.results")
-local scratch = require("psql.scratch")
-local csv = require("psql.csv")
-local export = require("psql.export")
-local resolve = require("psql.resolve")
+local config = require("dbsh.config")
+local exec = require("dbsh.exec")
+local results = require("dbsh.results")
+local scratch = require("dbsh.scratch")
+local csv = require("dbsh.csv")
+local export = require("dbsh.export")
+local resolve = require("dbsh.resolve")
 
 local M = {}
 
@@ -21,7 +21,7 @@ end
 function M.query(sql)
 	sql = vim.trim(sql or "")
 	if sql == "" then
-		vim.notify("psql.nvim: query is empty", vim.log.levels.WARN)
+		vim.notify("dbsh.nvim: query is empty", vim.log.levels.WARN)
 		return
 	end
 
@@ -112,7 +112,7 @@ function M.yank_csv()
 	local mode = vim.fn.mode()
 	if mode ~= csv.LINEWISE and mode ~= csv.BLOCKWISE then
 		vim.notify(
-			"psql.nvim: select lines with V or a block with <C-v> first",
+			"dbsh.nvim: select lines with V or a block with <C-v> first",
 			vim.log.levels.WARN
 		)
 		return
@@ -136,7 +136,7 @@ function M.yank_csv()
 		math.max(from[3], to[3])
 	)
 	if #rows == 0 then
-		vim.notify("psql.nvim: no table cell in the selection", vim.log.levels.WARN)
+		vim.notify("dbsh.nvim: no table cell in the selection", vim.log.levels.WARN)
 		return
 	end
 
@@ -144,7 +144,7 @@ function M.yank_csv()
 	for _, name in ipairs(M.yank_registers(vim.o.clipboard)) do
 		vim.fn.setreg(name, text)
 	end
-	vim.notify(string.format("psql.nvim: yanked %d row(s) as CSV", #rows))
+	vim.notify(string.format("dbsh.nvim: yanked %d row(s) as CSV", #rows))
 end
 
 -- The result buffer exports the query it is showing. Any other buffer
@@ -152,7 +152,7 @@ end
 -- command -- or the SQL paragraph under the cursor when no range is given.
 local function query_to_export(opts)
 	local name = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ":t")
-	if name == "__SQL__" then
+	if name == "__DBSH__" then
 		return M.last_query()
 	end
 
@@ -170,7 +170,7 @@ end
 function M.export_csv(opts)
 	local sql = vim.trim(query_to_export(opts) or "")
 	if sql == "" then
-		vim.notify("psql.nvim: nothing to export", vim.log.levels.WARN)
+		vim.notify("dbsh.nvim: nothing to export", vim.log.levels.WARN)
 		return
 	end
 
@@ -199,10 +199,10 @@ function M.export_csv(opts)
 				local path = export.free_path(vim.trim(choice))
 				export.run(sql, path, preamble, function(written, err)
 					if err ~= nil then
-						vim.notify("psql.nvim: " .. err, vim.log.levels.ERROR)
+						vim.notify("dbsh.nvim: " .. err, vim.log.levels.ERROR)
 						return
 					end
-					vim.notify("psql.nvim: exported to " .. written)
+					vim.notify("dbsh.nvim: exported to " .. written)
 				end)
 			end
 		)
@@ -210,39 +210,64 @@ function M.export_csv(opts)
 end
 
 local function pickers()
-	-- Deferred require: psql.telescope.pickers requires this module back.
-	return require("psql.telescope.pickers")
+	-- Deferred require: dbsh.telescope.pickers requires this module back.
+	return require("dbsh.telescope.pickers")
 end
 
+-- Names of the catalog commands currently declared, so a connection change can
+-- take them down before putting the new ones up.
+local level_commands = {}
+
+-- The catalog is backend-specific: a Mongo connection has no schema level, and
+-- offering :DbSchemas there would only produce an empty picker. So the commands
+-- are derived from what the backend declares, and redeclared when it changes.
+local function declare_level_commands()
+	for _, name in ipairs(level_commands) do
+		-- pcall: deleting a command that is not declared raises.
+		pcall(vim.api.nvim_del_user_command, name)
+	end
+	level_commands = {}
+
+	local backend = config.backend()
+	if backend == nil then
+		return
+	end
+
+	for index, level in ipairs(backend.levels) do
+		local name = "Db" .. level.command
+		vim.api.nvim_create_user_command(name, function()
+			pickers().level(index, {})
+		end, {})
+		table.insert(level_commands, name)
+	end
+end
+
+-- Everything here works the same whatever the connection drives.
 local function declare_commands()
 	local command = vim.api.nvim_create_user_command
 
-	command("PSQLConnections", function() pickers().connections() end, {})
-	command("PSQLDatabases", function() pickers().databases() end, {})
-	command("PSQLSchemas", function() pickers().schemas() end, {})
-	command("PSQLTables", function() pickers().tables({}) end, {})
-
-	command("PSQLTemp", function() scratch.open() end, {})
-	command("PSQLCancel", function() exec.cancel("user") end, {})
-	command("PSQLToggleResults", function()
+	command("DbConnections", function() pickers().connections() end, {})
+	command("DbTemp", function() scratch.open() end, {})
+	command("DbCancel", function() exec.cancel("user") end, {})
+	command("DbToggleResults", function()
 		local ok = results.toggle({ split = config.options().results_split })
 		if not ok then
-			vim.notify("psql.nvim: no result yet", vim.log.levels.WARN)
+			vim.notify("dbsh.nvim: no result yet", vim.log.levels.WARN)
 		end
 	end, {})
 	-- range = true: typing : in visual mode prefills '<,'>, which would
 	-- otherwise fail with E481 before the command even runs.
-	command("PSQLExportCSV", function(opts) M.export_csv(opts) end, { range = true })
+	command("DbExportCSV", function(opts) M.export_csv(opts) end, { range = true })
 
-	command("PSQLInfo", function()
+	command("DbInfo", function()
 		local name = config.current_name()
 		if name == nil then
-			vim.notify("psql.nvim: no current connection", vim.log.levels.WARN)
+			vim.notify("dbsh.nvim: no current connection", vim.log.levels.WARN)
 			return
 		end
 		local conn = config.current()
 		vim.notify(string.format(
-			"psql.nvim: %s -> %s@%s:%s/%s",
+			"dbsh.nvim: %s -> %s@%s:%s/%s",
 			name, conn.username, conn.host, tostring(conn.port), conn.database))
 	end, {})
 end
@@ -250,6 +275,15 @@ end
 function M.setup(opts)
 	config.setup(opts)
 	declare_commands()
+
+	-- config.setup selects the default connection, and therefore fires the
+	-- event, before this autocommand exists: the first declaration is explicit.
+	vim.api.nvim_create_autocmd("User", {
+		pattern = "DbshConnectionChanged",
+		group = vim.api.nvim_create_augroup("dbsh", { clear = true }),
+		callback = declare_level_commands,
+	})
+	declare_level_commands()
 end
 
 return M
