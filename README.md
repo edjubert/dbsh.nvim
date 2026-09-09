@@ -90,6 +90,9 @@ previews it immediately.
 - `psql` on your `PATH`
 - [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim) — **optional**;
   every picker degrades to a clear message without it, and queries work fine
+- [postgres-language-server](https://github.com/supabase-community/postgres-language-server) —
+  **optional**; only needed if you turn on `lsp.enabled`, see
+  [Language server](#language-server)
 
 ## Installation
 
@@ -159,6 +162,7 @@ require("dbsh").setup({
 	export_dir = vim.fs.joinpath(vim.fn.stdpath("data"), "dbsh", "exports"),
 	results_split = "horizontal",
 	variable_patterns = {}, -- e.g. { ":(raw_data)" }, see SQL variables below
+	lsp = { enabled = false }, -- steer postgres-language-server, see below
 })
 ```
 
@@ -173,6 +177,7 @@ require("dbsh").setup({
 | `export_dir` | `<stdpath("data")>/dbsh/exports` | Where `:DbExportCSV` suggests writing. |
 | `results_split` | `"horizontal"` | `"horizontal"`, `"vertical"` or `"float"`: which window opens `__DBSH__` in. Only applies the first time the window is created; combine with `vim.opt.splitright = true` for a right-hand split. `"float"` is styled after your telescope config, when installed. |
 | `variable_patterns` | `{}` | Lua patterns (one capture each) naming SQL variables to prompt for. See [SQL variables](#sql-variables). |
+| `lsp` | `{ enabled = false }` | Point an already-running [postgres-language-server](#language-server) at the connection you pick. Off by default: it talks to a client dbsh does not own. |
 
 There is deliberately **no** `password` field.
 
@@ -195,6 +200,70 @@ chmod 600 ~/.pgpass
 
 PostgreSQL silently ignores a `.pgpass` with looser permissions. The symptom is an
 unexpected password prompt, and it is the single most common setup mistake.
+
+## Language server
+
+[postgres-language-server](https://github.com/supabase-community/postgres-language-server)
+validates SQL against a real database: it will tell you a column does not exist
+before you run the query. It only knows one database at a time, declared in a
+configuration file — which does not survive someone who changes database ten
+times a day.
+
+Turn this on and the database you pick with `:DbDatabases` becomes the database
+it diagnoses against, with no restart and no file editing:
+
+```lua
+require("dbsh").setup({
+	connections = { ... },
+	lsp = { enabled = true },
+})
+```
+
+dbsh does not start, stop or install the server: it talks to the client **you**
+already run, through lspconfig or mason. It applies to every `.sql` file in the
+session, not just the scratchpad. Picking a schema with `:DbSchemas` pushes the
+same connection again, which costs nothing.
+
+After every successful query, dbsh clears the server's schema cache and warms it
+back up, so a `CREATE TABLE` is reflected in completion right away. It refreshes
+unconditionally rather than guessing which statements were DDL — dbsh never
+parses your SQL. The warm-up takes roughly half a second in the background,
+which is why it happens then rather than under your fingers on the next
+completion.
+
+### The password
+
+**dbsh pushes the host, the port, the user and the database. Never the
+password.** There is deliberately no `password` field in a dbsh connection, and
+that stays true here: a password pushed through the LSP protocol would land in
+`client.settings`, and in plain text in the Neovim LSP log for anyone running
+`vim.lsp.log` at `debug` level.
+
+The server only overrides the fields it receives, so the password you declare
+elsewhere survives. Three ways to give it one:
+
+1. A `password` in the project's `postgres-language-server.jsonc` — the nominal
+   path, and what survives dbsh pushing everything else.
+2. `PGPASSWORD` in Neovim's environment.
+3. No password at all: `trust`, a Unix socket, or `peer` authentication.
+
+If none applies, the server falls back to its own default, the connection fails,
+and **static diagnostics keep working** — parse errors and lints are unaffected.
+Only completion and type-checking stop, and they recover on their own once the
+connection succeeds.
+
+### Three things that will silently defeat it
+
+- **A `connectionString` in your `postgres-language-server.jsonc` wins over
+  everything.** The server reads the URI first and ignores the individual
+  fields, and dbsh cannot erase a field it does not send. Use the separate
+  `host`/`port`/`username`/`database` fields in that file.
+- **`PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE` or `DATABASE_URL` in your
+  environment win too**, because the server merges the environment last. This is
+  a real trap if you live in `psql` and export `PGDATABASE`. dbsh warns once per
+  session when it sees one.
+- **Editing `postgres-language-server.jsonc` mid-session** makes the server
+  reload the file and lose what dbsh pushed. Switching connection fixes it.
 
 ## Commands
 
