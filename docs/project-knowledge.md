@@ -13,7 +13,10 @@ Ses modules vivent sous `lua/dbsh/`, ses messages utilisateur sont préfixés `d
 ## Backends
 
 Un backend est une table de données et de fonctions, **sans état**, sous `lua/dbsh/backends/<nom>.lua`, enregistrée dans `lua/dbsh/backends/init.lua`.
-Il déclare `name`, `shape`, `filetype`, `extension`, `table_border`, `argv`, `env`, `preamble`, `parse_raw`, `variable_preamble`, `export_query`, `preview_query`, `levels`.
+Il déclare `name`, `shape`, `filetype`, `extension`, `table_border`, `argv`, `env`, `preamble`, `parse_raw`, `variable_preamble`, `export_query`, `preview_query`, `levels`, et éventuellement `lsp`.
+`lsp` est **optionnel** : `{ client_name, invalidate_command, settings(conn, options) }`, le serveur de langage que dbsh pilote pour ce backend.
+Un backend qui ne le déclare pas fait sortir `dbsh.lsp` immédiatement, sans erreur.
+`settings` reste libre de forme — chaque serveur nomme ses propres réglages — et ne contient **jamais** de mot de passe : dbsh ne transporte aucun secret.
 **La dépendance ne va que dans un sens** : `config` requiert le registre, un backend ne requiert jamais `config`, et les fonctions qui ont besoin d'une valeur de configuration la reçoivent en paramètre (`env(conn, options)`, `preview_query(item, limit)`).
 `levels[].list` a besoin d'`exec` et fait donc son `require` **dans le corps** de la fonction.
 
@@ -21,6 +24,7 @@ Il déclare `name`, `shape`, `filetype`, `extension`, `table_border`, `argv`, `e
 
 La hiérarchie de catalogue est la liste `backend.levels` ; chaque niveau porte `key`, `command`, `list(ctx, callback)` et `on_select` (`"set_level"`, `"descend"`, ou une fonction).
 Les commandes `:Db<command>` sont générées depuis cette liste par `dbsh.init` et redéclarées sur l'évènement `User DbshConnectionChanged`.
+`dbsh.lsp` s'accroche au même évènement pour repointer le serveur de langage, et à `LspAttach` pour le cas inverse — un client qui attache après le dernier changement de connexion.
 
 ## Runtime
 
@@ -52,6 +56,7 @@ Un store JSON corrompu ou absent est traité comme vide et ne fait jamais échou
 L'état vit dans deux modules et nulle part ailleurs : `config.state` (connexions déclarées, connexion courante, `generation`) et `exec.slots` (un processus en vol par slot, `user` et `introspect`).
 Le compteur `generation` est une garde d'annulation : un résultat qui revient après un changement de connexion est jeté.
 `config.backend()` résout le backend de la connexion courante ; `config.set_level(key, value)` fixe un niveau de navigation (par exemple `database`) sans toucher aux connexions déclarées.
+`set_connection` et `set_level` incrémentent tous deux `generation` et émettent `User DbshConnectionChanged` : tout ce qui dépend de la connexion courante s'accroche à cet évènement.
 
 ## Persistance
 
@@ -68,7 +73,7 @@ Un test asynchrone attend avec `vim.wait(500, function() return got ~= nil end)`
 
 ## Points d'injection
 
-Pas de framework de mock, l'injection se fait par champ de module réassignable : `exec.runner` (par défaut `vim.system`, remplacé par un faux runner qui appelle `on_exit` immédiatement) et `pickers._telescope()` (renvoie `nil` pour simuler telescope absent).
+Pas de framework de mock, l'injection se fait par champ de module réassignable : `exec.runner` (par défaut `vim.system`, remplacé par un faux runner qui appelle `on_exit` immédiatement), `pickers._telescope()` (renvoie `nil` pour simuler telescope absent), `lsp._clients` et `lsp._buffers` (remplacés par de faux clients LSP enregistrant `notify` et `request`).
 Un test qui les remplace les restaure en `post_case`.
 
 ## Commits
