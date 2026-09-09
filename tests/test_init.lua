@@ -321,4 +321,52 @@ T["hands the preamble to the csv export"] = function()
 	eq(seen, "\\set raw_data 'public.events'\n")
 end
 
+T["refreshes the schema cache after a successful query"] = function()
+	local lsp = require("dbsh.lsp")
+	local original = lsp.invalidate
+	local calls = 0
+	lsp.invalidate = function()
+		calls = calls + 1
+	end
+
+	exec.runner = function(_, _, on_exit)
+		vim.schedule(function()
+			on_exit({ code = 0, stdout = "one", stderr = "" })
+		end)
+		return { kill = function() end }
+	end
+
+	dbsh.query("SELECT 1;")
+	vim.wait(1000, function()
+		return calls > 0
+	end)
+
+	lsp.invalidate = original
+	eq(calls, 1)
+end
+
+T["does not refresh the schema cache when the query fails"] = function()
+	local lsp = require("dbsh.lsp")
+	local original = lsp.invalidate
+	local calls = 0
+	lsp.invalidate = function()
+		calls = calls + 1
+	end
+
+	exec.runner = function(_, _, on_exit)
+		vim.schedule(function()
+			on_exit({ code = 2, stdout = "", stderr = "syntax error" })
+		end)
+		return { kill = function() end }
+	end
+
+	dbsh.query("SELEC 1;")
+	vim.wait(200, function()
+		return calls > 0
+	end)
+
+	lsp.invalidate = original
+	eq(calls, 0)
+end
+
 return T
