@@ -50,3 +50,14 @@ dbsh snowflake smoke: authenticated JSON_EXT result received
 
 Failures are sanitized: the password, command output, and full child environment are never
 printed.
+
+The production backend uses the same temporary connection flags with `--filename <sql-file>`.
+It never creates a persistent Snow CLI connection. Its password cache is in memory only,
+defaults to 15 minutes, is cleared when Neovim exits, and is invalidated before one recognized
+authentication retry.
+
+Snowflake contexts are role, warehouse, database and schema. dbsh passes them as CLI flags for
+each command; a manually typed `USE` affects that command only. Catalogs use `JSON_EXT` and
+include account-level categories through `SHOW` plus `RESULT_SCAN`, and database categories
+through paged, literal-filtered information-schema queries. Database permissions remain the
+security authority; dbsh safety confirmations do not bypass them.

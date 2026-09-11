@@ -270,6 +270,35 @@ local function ordered_object_keys(input)
 	return nil
 end
 
+local function top_level_array_values(input)
+	local index = skip_whitespace(input, 1)
+	if input:sub(index, index) ~= "[" then
+		return nil
+	end
+	index = skip_whitespace(input, index + 1)
+	local values = {}
+	while index <= #input do
+		if input:sub(index, index) == "]" then
+			return values
+		end
+		local start = index
+		index = skip_json_value(input, index)
+		if index == nil then
+			return nil
+		end
+		table.insert(values, input:sub(start, index - 1))
+		index = skip_whitespace(input, index)
+		if input:sub(index, index) == "]" then
+			return values
+		end
+		if input:sub(index, index) ~= "," then
+			return nil
+		end
+		index = skip_whitespace(input, index + 1)
+	end
+	return nil
+end
+
 local function stringify(value)
 	if value == vim.NIL then
 		return "(NULL)"
@@ -291,7 +320,16 @@ function M.parse_raw(stdout)
 	if not ok or type(payload) ~= "table" then
 		return nil, "invalid Snowflake JSON_EXT output"
 	end
-	local keys = ordered_object_keys(stdout or "")
+	local source = stdout or ""
+	local result_sources = top_level_array_values(source)
+	if result_sources ~= nil
+		and #result_sources == #payload
+		and result_sources[1] ~= nil
+		and result_sources[1]:match("^%s*%[") ~= nil then
+		payload = payload[#payload]
+		source = result_sources[#result_sources]
+	end
+	local keys = ordered_object_keys(source)
 	if keys == nil then
 		return nil, "invalid Snowflake JSON_EXT output"
 	end
@@ -333,33 +371,487 @@ function M.is_authentication_error(stderr, stdout)
 		and output:find("incorrect username or password", 1, true) ~= nil
 end
 
+local function quote_ident(value)
+	return '"' .. tostring(value):gsub('"', '""') .. '"'
+end
+
+local function quote_literal(value)
+	return "'" .. tostring(value):gsub("'", "''") .. "'"
+end
+
+local function filtered_literal(value)
+	local escaped = tostring(value or "")
+	escaped = escaped:gsub("!", "!!")
+	escaped = escaped:gsub("%%", "!%%")
+	escaped = escaped:gsub("_", "!_")
+	return quote_literal(escaped)
+end
+
+local function context_level(request, key)
+	local context = request.context or {}
+	return (context.levels or {})[key] or context[key]
+end
+
+local function valid_limit(value)
+	return type(value) == "number" and value > 0 and value == math.floor(value)
+end
+
+local function decode_cursor(cursor, length)
+	if cursor == nil then
+		return nil
+	end
+	local ok, values = pcall(vim.json.decode, cursor)
+	if not ok or type(values) ~= "table" or #values ~= length then
+		return nil, "malformed Snowflake catalog cursor"
+	end
+	for _, value in ipairs(values) do
+		if type(value) ~= "string" then
+			return nil, "malformed Snowflake catalog cursor"
+		end
+	end
+	return values
+end
+
+local function keyset_predicate(fields, values)
+	if values == nil then
+		return nil
+	end
+	local alternatives = {}
+	for index, field in ipairs(fields) do
+		local terms = {}
+		for previous = 1, index - 1 do
+			table.insert(terms, fields[previous] .. " = " .. quote_literal(values[previous]))
+		end
+		table.insert(terms, field .. " > " .. quote_literal(values[index]))
+		table.insert(alternatives, "(" .. table.concat(terms, " AND ") .. ")")
+	end
+	return "(" .. table.concat(alternatives, " OR ") .. ")"
+end
+
+local function info_schema_query(spec, request)
+	local database = context_level(request, "database")
+	if type(database) ~= "string" or database == "" then
+		return nil, "Snowflake catalog requires a database context"
+	end
+	if not valid_limit(request.limit) then
+		return nil, "Snowflake catalog requires a positive page size"
+	end
+
+	local where = {}
+	for _, predicate in ipairs(spec.where or {}) do
+		table.insert(where, predicate)
+	end
+	local scope = request.scope or {}
+	if spec.scoped and not scope.all_schemas and type(scope.schema) == "string" and scope.schema ~= "" then
+		table.insert(where, spec.schema_column .. " = " .. quote_literal(scope.schema))
+	end
+	if request.query ~= nil and request.query ~= "" then
+		table.insert(
+			where,
+			spec.name_column .. " ILIKE '%' || " .. filtered_literal(request.query) .. " || '%' ESCAPE '!'"
+		)
+	end
+
+	local cursor_fields = spec.scoped and { spec.schema_column, spec.name_column } or { spec.name_column }
+	local cursor, cursor_err = decode_cursor(request.cursor, #cursor_fields)
+	if cursor_err ~= nil then
+		return nil, cursor_err
+	end
+	local predicate = keyset_predicate(cursor_fields, cursor)
+	if predicate ~= nil then
+		table.insert(where, predicate)
+	end
+	if #where == 0 then
+		table.insert(where, "TRUE")
+	end
+
+	local select = {}
+	if spec.scoped then
+		table.insert(select, spec.schema_column .. " AS schema_name")
+	end
+	table.insert(select, spec.name_column .. " AS name")
+	table.insert(select, (spec.kind_column or quote_literal(spec.kind)) .. " AS object_type")
+	return table.concat({
+		"SELECT " .. table.concat(select, ", "),
+		"FROM " .. quote_ident(database) .. ".INFORMATION_SCHEMA." .. spec.source,
+		"WHERE " .. table.concat(where, "\n  AND "),
+		"ORDER BY " .. table.concat(cursor_fields, ", "),
+		"LIMIT " .. tostring(request.limit + 1) .. ";",
+	}, "\n")
+end
+
+local function show_query(spec, request)
+	if not valid_limit(request.limit) then
+		return nil, "Snowflake catalog requires a positive page size"
+	end
+	local show = spec.show
+	if spec.show_scoped then
+		local database = context_level(request, "database")
+		if type(database) ~= "string" or database == "" then
+			return nil, "Snowflake catalog requires a database context"
+		end
+		local scope = request.scope or {}
+		if not scope.all_schemas and type(scope.schema) == "string" and scope.schema ~= "" then
+			show = show .. " IN SCHEMA " .. quote_ident(database) .. "." .. quote_ident(scope.schema)
+		else
+			show = show .. " IN DATABASE " .. quote_ident(database)
+		end
+	end
+	local where = {}
+	if request.query ~= nil and request.query ~= "" then
+		table.insert(where, '"name" ILIKE \'%\' || ' .. filtered_literal(request.query) .. " || '%' ESCAPE '!'")
+	end
+	local cursor, cursor_err = decode_cursor(request.cursor, 1)
+	if cursor_err ~= nil then
+		return nil, cursor_err
+	end
+	local predicate = keyset_predicate({ '"name"' }, cursor)
+	if predicate ~= nil then
+		table.insert(where, predicate)
+	end
+	if #where == 0 then
+		table.insert(where, "TRUE")
+	end
+	return table.concat({
+		show .. ";",
+		"SELECT \"name\" AS name, " .. quote_literal(spec.kind) .. " AS object_type",
+		"FROM TABLE(RESULT_SCAN(LAST_QUERY_ID()))",
+		"WHERE " .. table.concat(where, "\n  AND "),
+		"ORDER BY \"name\"",
+		"LIMIT " .. tostring(request.limit + 1) .. ";",
+	}, "\n")
+end
+
+local catalog_specs = {
+	roles = { kind = "role", show = "SHOW ROLES", scope = false, query = show_query },
+	warehouses = { kind = "warehouse", show = "SHOW WAREHOUSES", scope = false, query = show_query },
+	databases = { kind = "database", show = "SHOW DATABASES", scope = false, query = show_query },
+	schemas = {
+		kind = "schema",
+		source = "SCHEMATA",
+		name_column = "SCHEMA_NAME",
+		scope = false,
+		query = info_schema_query,
+	},
+	relations = {
+		kind = "relation",
+		source = "TABLES",
+		schema_column = "TABLE_SCHEMA",
+		name_column = "TABLE_NAME",
+		kind_column = "TABLE_TYPE",
+		where = { "TABLE_TYPE IN ('BASE TABLE', 'VIEW', 'MATERIALIZED VIEW', 'DYNAMIC TABLE')" },
+		scoped = true,
+		row_has_schema = true,
+		query = info_schema_query,
+	},
+	routines = {
+		kind = "routine",
+		show = "SHOW USER FUNCTIONS",
+		scoped = true,
+		show_scoped = true,
+		query = show_query,
+	},
+	sequences = {
+		kind = "sequence",
+		source = "SEQUENCES",
+		schema_column = "SEQUENCE_SCHEMA",
+		name_column = "SEQUENCE_NAME",
+		scoped = true,
+		row_has_schema = true,
+		query = info_schema_query,
+	},
+	stages = {
+		kind = "stage",
+		source = "STAGES",
+		schema_column = "STAGE_SCHEMA",
+		name_column = "STAGE_NAME",
+		scoped = true,
+		row_has_schema = true,
+		query = info_schema_query,
+	},
+	file_formats = {
+		kind = "file format",
+		source = "FILE_FORMATS",
+		schema_column = "FILE_FORMAT_SCHEMA",
+		name_column = "FILE_FORMAT_NAME",
+		scoped = true,
+		row_has_schema = true,
+		query = info_schema_query,
+	},
+	streams = {
+		kind = "stream",
+		show = "SHOW STREAMS",
+		scoped = true,
+		show_scoped = true,
+		query = show_query,
+	},
+	tasks = {
+		kind = "task",
+		show = "SHOW TASKS",
+		scoped = true,
+		show_scoped = true,
+		query = show_query,
+	},
+	pipes = {
+		kind = "pipe",
+		source = "PIPES",
+		schema_column = "PIPE_SCHEMA",
+		name_column = "PIPE_NAME",
+		scoped = true,
+		row_has_schema = true,
+		query = info_schema_query,
+	},
+}
+
+function M.catalog_query(key, request)
+	local spec = catalog_specs[key]
+	if spec == nil then
+		return nil, "unknown Snowflake catalog"
+	end
+	return spec.query(spec, request)
+end
+
+local function fetch(sql, callback)
+	local exec = require("dbsh.exec")
+	exec.run(sql, { mode = "raw", slot = "introspect" }, function(code, stdout, stderr)
+		if code ~= 0 then
+			callback(nil, stderr ~= "" and stderr or "snow sql failed")
+			return
+		end
+		local rows, err = M.parse_raw(stdout)
+		if rows == nil then
+			callback(nil, err)
+			return
+		end
+		callback(rows, nil)
+	end)
+end
+
+local function object_item(spec, request, row)
+	local database = context_level(request, "database")
+	local schema, name, object_type
+	if spec.row_has_schema then
+		schema, name, object_type = row[1], row[2], row[3]
+	else
+		name, object_type = row[1], row[2]
+	end
+	local identity = { database = database, schema = schema, name = name }
+	local value = {
+		kind = spec.kind,
+		database = database,
+		schema = schema,
+		name = name,
+		relation_type = object_type,
+		identity = identity,
+	}
+	local qualified = schema ~= nil and schema .. "." .. name or name
+	return {
+		value = value,
+		display = string.format("%s  [%s]", qualified, object_type ~= "" and object_type or spec.kind),
+		ordinal = string.format("%s %s", qualified:gsub("%.", " "), spec.kind),
+	}
+end
+
+local function list_catalog(key)
+	return function(request, callback)
+		local spec = catalog_specs[key]
+		local sql, err = M.catalog_query(key, request)
+		if sql == nil then
+			callback(nil, err)
+			return
+		end
+		fetch(sql, function(rows, fetch_err)
+			if rows == nil then
+				callback(nil, fetch_err)
+				return
+			end
+			local items = {}
+			for index = 1, math.min(#rows, request.limit) do
+				table.insert(items, object_item(spec, request, rows[index]))
+			end
+			local next_cursor
+			if #rows > request.limit then
+				local row = rows[request.limit]
+				next_cursor = vim.json.encode(spec.row_has_schema and { row[1], row[2] } or { row[1] })
+			end
+			callback({ items = items, next_cursor = next_cursor }, nil)
+		end)
+	end
+end
+
+local function context_list(key)
+	local list = list_catalog(key)
+	return function(request, callback)
+		list(request, function(page, err)
+			if page == nil then
+				callback(nil, err)
+				return
+			end
+			local items = {}
+			for _, item in ipairs(page.items) do
+				table.insert(items, {
+					value = item.value.name,
+					display = item.value.name,
+					ordinal = item.value.name,
+				})
+			end
+			callback({ items = items, next_cursor = page.next_cursor }, nil)
+		end)
+	end
+end
+
 local function apply_context(key)
 	return function(snapshot, value)
 		return require("dbsh.context").apply(snapshot, key, value, "catalog")
 	end
 end
 
-local function unavailable_context(_, callback)
-	callback(nil, "Snowflake context catalog is not available yet")
+local function select_relation(item)
+	local object = type(item.value) == "table" and item.value or item
+	if object.database == nil or object.schema == nil or object.name == nil then
+		return
+	end
+	local config = require("dbsh.config")
+	require("dbsh").query(string.format(
+		"SELECT * FROM %s.%s.%s LIMIT %d;",
+		quote_ident(object.database),
+		quote_ident(object.schema),
+		quote_ident(object.name),
+		config.options().preview_limit
+	))
 end
 
+M.catalogs = {
+	{ key = "roles", command = "Roles", title = "Roles", list = list_catalog("roles"), scope = false },
+	{
+		key = "warehouses",
+		command = "Warehouses",
+		title = "Warehouses",
+		list = list_catalog("warehouses"),
+		scope = false,
+	},
+	{
+		key = "databases",
+		command = "Databases",
+		title = "Databases",
+		list = list_catalog("databases"),
+		scope = false,
+	},
+	{ key = "schemas", command = "Schemas", title = "Schemas", list = list_catalog("schemas"), scope = false },
+	{
+		key = "relations",
+		command = "Relations",
+		title = "Relations",
+		list = list_catalog("relations"),
+		on_select = select_relation,
+		scope = true,
+	},
+	{
+		key = "routines",
+		command = "Functions",
+		title = "Functions",
+		list = list_catalog("routines"),
+		scope = true,
+		definition = true,
+	},
+	{
+		key = "sequences",
+		command = "Sequences",
+		title = "Sequences",
+		list = list_catalog("sequences"),
+		scope = true,
+		definition = true,
+	},
+	{
+		key = "stages",
+		command = "Stages",
+		title = "Stages",
+		list = list_catalog("stages"),
+		scope = true,
+		definition = true,
+	},
+	{
+		key = "file_formats",
+		command = "FileFormats",
+		title = "File formats",
+		list = list_catalog("file_formats"),
+		scope = true,
+		definition = true,
+	},
+	{
+		key = "streams",
+		command = "Streams",
+		title = "Streams",
+		list = list_catalog("streams"),
+		scope = true,
+		definition = true,
+	},
+	{
+		key = "tasks",
+		command = "Tasks",
+		title = "Tasks",
+		list = list_catalog("tasks"),
+		scope = true,
+		definition = true,
+	},
+	{
+		key = "pipes",
+		command = "Pipes",
+		title = "Pipes",
+		list = list_catalog("pipes"),
+		scope = true,
+		definition = true,
+	},
+}
+
 M.contexts = {
-	{ key = "role", command = "Roles", title = "Roles", list = unavailable_context, apply = apply_context("role") },
+	{ key = "role", command = "Roles", title = "Roles", list = context_list("roles"), apply = apply_context("role") },
 	{
 		key = "warehouse",
 		command = "Warehouses",
 		title = "Warehouses",
-		list = unavailable_context,
+		list = context_list("warehouses"),
 		apply = apply_context("warehouse"),
 	},
 	{
 		key = "database",
 		command = "Databases",
 		title = "Databases",
-		list = unavailable_context,
+		list = context_list("databases"),
 		apply = apply_context("database"),
 	},
-	{ key = "schema", command = "Schemas", title = "Schemas", list = unavailable_context, apply = apply_context("schema") },
+	{ key = "schema", command = "Schemas", title = "Schemas", list = context_list("schemas"), apply = apply_context("schema") },
 }
+
+function M.definition_request(snapshot, object)
+	if type(object) ~= "table" or object.kind ~= "relation" then
+		return nil, "definition is not available for this object kind"
+	end
+	local database = object.database or (snapshot.levels or {}).database
+	if type(database) ~= "string"
+		or type(object.schema) ~= "string"
+		or type(object.name) ~= "string" then
+		return nil, "definition requires a qualified Snowflake relation"
+	end
+	local relation_type = {
+		["BASE TABLE"] = "TABLE",
+		["VIEW"] = "VIEW",
+		["MATERIALIZED VIEW"] = "MATERIALIZED VIEW",
+		["DYNAMIC TABLE"] = "DYNAMIC TABLE",
+	}
+	local object_type = relation_type[object.relation_type] or "TABLE"
+	local qualified = table.concat({ database, object.schema, object.name }, ".")
+	return {
+		kind = "sql",
+		sql = "SELECT GET_DDL(" .. quote_literal(object_type) .. ", " .. quote_literal(qualified) .. ");",
+		parse = function(stdout)
+			local rows = M.parse_raw(stdout)
+			if rows == nil or rows[1] == nil or rows[1][1] == nil then
+				return nil, "definition output could not be parsed"
+			end
+			return rows[1][1], nil
+		end,
+	}
+end
 
 return M

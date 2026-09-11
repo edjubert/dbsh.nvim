@@ -288,6 +288,40 @@ T["uses an all-schema scope without persisting it in context"] = function()
 	eq(context.current(0).levels.schema, nil)
 end
 
+T["does not ask for a schema scope for a backend-neutral account catalog"] = function()
+	config.setup({
+		connections = {
+			snow = {
+				type = "snowflake",
+				host = "account.example.test",
+				port = 443,
+				username = "analyst",
+				authenticator = "https://sso.example.test",
+				role = "ANALYST",
+				warehouse = "COMPUTE",
+				database = "ANALYTICS",
+				password_command = { "password-command" },
+			},
+		},
+		default = "snow",
+	})
+	context.setup()
+	local catalog = require("dbsh.catalog")
+	local original_request, original_select = catalog.request, vim.ui.select
+	local seen
+	catalog.request = function(_, _, options, callback)
+		seen = options
+		callback({ items = {}, next_cursor = nil }, nil)
+	end
+	vim.ui.select = function(_, _, callback) callback(nil) end
+
+	pickers.catalog("roles")
+
+	vim.ui.select = original_select
+	catalog.request = original_request
+	eq(seen.scope, { schema = nil, all_schemas = false })
+end
+
 T["offers load more only while the catalog has a cursor"] = function()
 	connect()
 	local catalog = require("dbsh.catalog")
