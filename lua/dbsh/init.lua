@@ -2,6 +2,7 @@
 
 local config = require("dbsh.config")
 local backends = require("dbsh.backends")
+local credentials = require("dbsh.credentials")
 local context = require("dbsh.context")
 local exec = require("dbsh.exec")
 local results = require("dbsh.results")
@@ -47,7 +48,7 @@ local function run_query(sql, snapshot)
 			end
 			results.render(snapshot, sql, output, split_opts)
 			if code == 0 then
-				lsp.invalidate_external(snapshot)
+				lsp.invalidate(snapshot)
 			end
 		end)
 	end)
@@ -290,6 +291,9 @@ local function declare_commands()
 		end
 	end, {})
 	command("DbExportCSV", function(opts) M.export_csv(opts) end, { range = true })
+	command("DbLspStatus", function()
+		vim.notify(lsp.status_message(context.snapshot(0)))
+	end, {})
 
 	command("DbInfo", function()
 		local snapshot = context.snapshot(0)
@@ -330,6 +334,7 @@ end
 function M.setup(opts)
 	config.setup(opts)
 	context.setup()
+	lsp.setup()
 	last_queries = {}
 	declare_commands()
 
@@ -339,18 +344,45 @@ function M.setup(opts)
 		group = group,
 		callback = function(args)
 			local bufnr = args.data and args.data.bufnr or 0
-			lsp.sync_external(context.snapshot(bufnr))
+			lsp.on_context_changed(bufnr, context.snapshot(bufnr))
 		end,
 	})
-	lsp.sync_external(context.snapshot(0))
+	lsp.on_context_changed(0, context.snapshot(0))
 
 	vim.api.nvim_create_autocmd("LspAttach", {
 		group = group,
 		callback = function(args)
-			lsp.sync_external_client(
-				vim.lsp.get_client_by_id(args.data.client_id),
-				context.snapshot(args.buf)
-			)
+			if config.options().lsp.mode == "external" then
+				lsp.sync_external_client(
+					vim.lsp.get_client_by_id(args.data.client_id),
+					context.snapshot(args.buf)
+				)
+			end
+		end,
+	})
+
+	vim.api.nvim_create_autocmd({ "BufWipeout", "BufDelete" }, {
+		group = group,
+		callback = function(args)
+			if config.options().lsp.mode == "managed" then
+				lsp.detach_managed(args.buf)
+			end
+		end,
+	})
+
+	vim.api.nvim_create_autocmd("VimLeavePre", {
+		group = group,
+		callback = function()
+			if config.options().lsp.mode == "managed" then
+				lsp.shutdown_managed()
+			end
+		end,
+	})
+
+	vim.api.nvim_create_autocmd("VimLeavePre", {
+		group = group,
+		callback = function()
+			credentials.clear()
 		end,
 	})
 end

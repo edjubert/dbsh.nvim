@@ -73,6 +73,18 @@ T["uses a public definition identity without secrets or query text"] = function(
 	eq(key:find("SELECT"), nil)
 end
 
+T["uses a backend-normalized non-OID identity when one is provided"] = function()
+	local key = definitions.key(snapshots.a, {
+		kind = "relation",
+		identity = { database = "ANALYTICS", schema = "PUBLIC", name = "ORDERS" },
+	})
+
+	expect_match(key, "ANALYTICS")
+	expect_match(key, "PUBLIC")
+	expect_match(key, "ORDERS")
+	eq(key:find("not%-in%-a%-definition%-key"), nil)
+end
+
 T["reuses one definition buffer for one object identity"] = function()
 	successful_runner()
 	local first = assert(definitions.open(snapshots.a, relation(42)))

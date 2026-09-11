@@ -46,6 +46,11 @@ un buffer de définition crée un split au lieu de remplacer le DDL visible.
 `exec.lua` possède des slots par session : `user`, `introspect` et `definition`.
 `run` écrit un script SQL temporaire ; `run_argv` exécute un argv fourni par un
 backend, sans script temporaire ni journalisation des arguments/environnements.
+Un backend peut préparer un runtime privé asynchrone. Pour Snowflake, ce runtime
+contient seulement un mot de passe en mémoire provenant d’un `password_command`
+argv, mis dans `SNOWFLAKE_PASSWORD` pour le processus `snow` enfant. Les secrets
+ne doivent jamais rejoindre le contexte public, les clés de catalogue, les
+buffers de résultat, les erreurs ou la persistance.
 
 `safety.lua` est pur et ne dépend pas de l’UI. Son classifieur est volontairement
 conservateur : lectures connues exécutées directement, mutations/privilèges,
@@ -86,7 +91,50 @@ notifications passent par `vim.notify` avec le préfixe standard.
 Les tests MiniTest se lancent avec `make test`. Utiliser un fichier
 `tests/test_<module>.lua`, `tests/helpers.lua`, et `vim.wait` pour l’asynchrone.
 Les coutures de test sont des champs réassignables : `exec.runner`,
-`pickers._telescope`, les tables LSP, et les modules purs (`safety.classify`,
-constructeurs de requêtes backend). Restaurer toute injection dans les hooks.
+`pickers._telescope`, les coutures LSP (`start_client`, `attach_client`,
+`detach_client`, `request`, `stop_client`, diagnostics et timers), et les
+modules purs (`safety.classify`, constructeurs de requêtes backend). Restaurer
+toute injection dans les hooks.
+
+## PgLS
+
+`lsp.mode` vaut `off`, `external` ou `managed`. Le booléen historique
+`lsp.enabled = true` reste un alias déprécié de `external`; la valeur `false`
+reste `off`. Le chemin `external` cible exclusivement un client PgLS appartenant
+à l'utilisateur : notification de configuration sans mot de passe et
+invalidation du cache après requête, sans jamais gérer son cycle de vie. Son
+statut doit rappeler la limitation **last-synchronized context wins**.
+
+Le chemin `managed` ne concerne que PostgreSQL. Il possède les clients natifs
+Neovim, indexés par l’empreinte publique de connexion, la base effective, la
+racine de projet et le `search_path` résolu. Le mot de passe reste en mémoire et
+ne transite que par `pgls/setDatabaseContext`; il ne doit jamais apparaître dans
+une clé, un statut, une notification, un log ou une configuration persistée.
+Les stratégies de pool sont `immediate`, `idle` et `session`. La réconciliation
+de contexte ne détache que les clients gérés, et réinitialise uniquement leur
+namespace de diagnostics.
+
+`DbLspStatus` affiche seulement l’état public du contexte actif. Le protocole
+requiert une version de PgLS contenant `pgls/setDatabaseContext`: livrer/merger
+d’abord cette évolution PgLS, puis dbsh. Un binaire local patché via
+`lsp.command` est autorisé uniquement pour le développement et la revue, jamais
+dans une configuration partagée.
 
 Les commits suivent Conventional Commits, en anglais.
+
+## Snowflake
+
+Le backend Snowflake utilise exclusivement `snow sql` avec une connexion
+temporaire structurée. Les profils ne contiennent ni JDBC URL ni mot de passe
+littéral. Les flags de rôle, warehouse, base et schéma représentent le contexte
+effectif ; un `USE` saisi dans le SQL ne modifie pas le contexte dbsh.
+
+Les catalogues Snowflake utilisent `JSON_EXT`. Les requêtes à plusieurs
+instructions, notamment `SHOW` suivi de `RESULT_SCAN`, retournent plusieurs
+jeux de résultats : le parseur utilise le dernier, qui porte la sélection,
+le filtre et la pagination. Les catégories avec un schéma utilisent le scope
+générique ; les catégories compte n’en demandent pas.
+
+Le cache de credentials est en mémoire, expire par TTL, est invalidé après une
+erreur d’authentification reconnue et est vidé à la sortie de Neovim. Les
+permissions Snowflake restent la frontière de sécurité.
