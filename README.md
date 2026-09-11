@@ -310,20 +310,17 @@ first, then dbsh, and test against a merged or released PgLS binary before
 release.
 
 Until PgLS ships that request, development and review can build the companion
-[PgLS context RPC commit](https://github.com/edjubert/postgres-language-server/commit/4ab9acd4441cdd6721e0a2d57e8e2935f5d90cf3):
+[upstream PgLS context RPC pull request](https://github.com/supabase-community/postgres-language-server/pull/794):
 
 ```bash
 git clone https://github.com/supabase-community/postgres-language-server.git
 cd postgres-language-server
-git fetch https://github.com/edjubert/postgres-language-server.git \
-  edjubert/pgls-database-context-rpc
-git checkout --detach FETCH_HEAD
+gh pr checkout 794
 cargo build --release
 ```
 
-An existing PgLS checkout may cherry-pick that same commit instead. Point
-`lsp.command` at the locally built binary only; do not put a machine-specific
-path in shared configuration.
+Point `lsp.command` at the locally built binary only; do not put a
+machine-specific path in shared configuration.
 
 ## Commands
 
