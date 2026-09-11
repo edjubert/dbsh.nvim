@@ -58,9 +58,42 @@ T["declares every backend-agnostic command"] = function()
 	for _, name in ipairs({
 		"DbConnections", "DbTemp", "DbCancel", "DbToggleResults", "DbInfo",
 		"DbObjects", "DbGlobalConnection", "DbForgetConnection",
+		"DbDefinitions", "DbToggleDefinition", "DbRefreshDefinition", "DbCloseDefinitions",
 	}) do
 		eq(vim.fn.exists(":" .. name), 2)
 	end
+end
+
+T["delegates definition commands to their picker and registry"] = function()
+	local pickers = require("dbsh.telescope.pickers")
+	local definitions = require("dbsh.definitions")
+	local original_picker = pickers.definitions
+	local original_toggle, original_refresh, original_close =
+		definitions.toggle, definitions.refresh, definitions.close
+	local calls = {}
+	pickers.definitions = function() table.insert(calls, "picker") end
+	definitions.toggle = function()
+		table.insert(calls, "toggle")
+		return true
+	end
+	definitions.refresh = function()
+		table.insert(calls, "refresh")
+		return true
+	end
+	definitions.close = function()
+		table.insert(calls, "close")
+	end
+
+	vim.cmd("DbDefinitions")
+	vim.cmd("DbToggleDefinition")
+	vim.cmd("DbRefreshDefinition")
+	vim.cmd("DbCloseDefinitions")
+
+	definitions.close = original_close
+	definitions.refresh = original_refresh
+	definitions.toggle = original_toggle
+	pickers.definitions = original_picker
+	eq(calls, { "picker", "toggle", "refresh", "close" })
 end
 
 T["opens the scratchpad catalog from DbTemp"] = function()

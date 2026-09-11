@@ -194,6 +194,74 @@ T["keeps user and introspection slots separate in one session"] = function()
 	eq(#killed, 1)
 end
 
+T["runs definition argv without writing a temporary SQL script"] = function()
+	local original_write_script = exec.write_script
+	exec.write_script = function()
+		error("run_argv must not create a SQL script")
+	end
+	local captured
+	exec.runner = function(argv, opts, callback)
+		captured = { argv = argv, opts = opts }
+		vim.schedule(function()
+			callback({ code = 0, stdout = "DDL", stderr = "" })
+		end)
+		return { kill = function() end }
+	end
+
+	local got
+	exec.run_argv(context.snapshot(0), {
+		argv = { "pg_dump", "--schema-only" },
+		env = { PGCONNECT_TIMEOUT = "9" },
+	}, function(code, stdout)
+		got = { code = code, stdout = stdout }
+	end)
+	vim.wait(500, function() return got ~= nil end)
+
+	exec.write_script = original_write_script
+	eq(captured.argv, { "pg_dump", "--schema-only" })
+	eq(captured.opts.env, { PGCONNECT_TIMEOUT = "9" })
+	eq(got, { code = 0, stdout = "DDL" })
+end
+
+T["keeps definition argv in an independent session slot"] = function()
+	local handles = {}
+	exec.runner = function(_, _, _)
+		local handle = {
+			killed = false,
+			kill = function(self) self.killed = true end,
+		}
+		table.insert(handles, handle)
+		return handle
+	end
+
+	local snapshot = context.snapshot(0)
+	exec.run("SELECT 1;", { context = snapshot }, function() end)
+	exec.run_argv(snapshot, { argv = { "pg_dump" }, env = {} }, function() end)
+	eq(handles[1].killed, false)
+	eq(handles[2].killed, false)
+	eq(exec.slots[snapshot.id].user, handles[1])
+	eq(exec.slots[snapshot.id].definition, handles[2])
+end
+
+T["drops a stale definition argv callback"] = function()
+	local on_exit
+	exec.runner = function(_, _, callback)
+		on_exit = callback
+		return { kill = function() end }
+	end
+	local snapshot = context.snapshot(0)
+	local delivered = false
+
+	exec.run_argv(snapshot, { argv = { "pg_dump" }, env = {} }, function()
+		delivered = true
+	end)
+	assert(context.bind(snapshot.bufnr, "staging", "test"))
+	on_exit({ code = 0, stdout = "old", stderr = "" })
+	vim.wait(100, function() return delivered end)
+
+	eq(delivered, false)
+end
+
 T["writes the backend preamble before the query"] = function()
 	local path = exec.write_script(postgres, "SELECT 1;", "pretty")
 	local content = table.concat(vim.fn.readfile(path), "\n")

@@ -432,6 +432,42 @@ T["hands a selected object to its catalog action"] = function()
 	expect_match(asked, "public")
 end
 
+T["opens a structural catalog object in its definition buffer"] = function()
+	connect()
+	local catalog = require("dbsh.catalog")
+	local definitions = require("dbsh.definitions")
+	local original_request, original_open, original_telescope, original_select =
+		catalog.request, definitions.open, pickers._telescope, vim.ui.select
+	local opened
+	catalog.request = function(_, _, _, callback)
+		callback({
+			items = {
+				{
+					value = { kind = "index", oid = "99", schema = "public", name = "users_pkey" },
+					display = "public.users_pkey  [index]",
+					ordinal = "public users_pkey index",
+				},
+			},
+			next_cursor = nil,
+		}, nil)
+	end
+	definitions.open = function(snapshot, object)
+		opened = { snapshot = snapshot, object = object }
+		return {}
+	end
+	pickers._telescope = function() return nil end
+	vim.ui.select = function(items, _, callback) callback(items[1]) end
+
+	pickers.catalog("indexes", { scope = { schema = "public", all_schemas = false } })
+
+	vim.ui.select = original_select
+	pickers._telescope = original_telescope
+	definitions.open = original_open
+	catalog.request = original_request
+	eq(opened.object.oid, "99")
+	eq(opened.object.kind, "index")
+end
+
 T["opens the selected scratchpad from the catalog picker"] = function()
 	connect()
 	local captured = {}

@@ -27,7 +27,7 @@ local function slots_for(snapshot, create)
 end
 
 local function prune_slots(snapshot, slots)
-	if slots.user == nil and slots.introspect == nil then
+	if slots.user == nil and slots.introspect == nil and slots.definition == nil then
 		M.slots[snapshot.id] = nil
 	end
 end
@@ -104,6 +104,59 @@ function M.run(sql, opts, callback)
 		},
 		vim.schedule_wrap(function(obj)
 			os.remove(tmpfile)
+			local current_slots = slots_for(snapshot, false)
+			if current_slots == nil then
+				return
+			end
+			local active = current_slots[slot]
+			if active ~= operation and active ~= operation.handle then
+				return
+			end
+			current_slots[slot] = nil
+			prune_slots(snapshot, current_slots)
+			if not context.is_current(snapshot) then
+				return
+			end
+			callback(obj.code, obj.stdout or "", obj.stderr or "")
+		end)
+	)
+
+	operation.handle = handle
+	if slots[slot] == operation then
+		slots[slot] = handle
+	end
+	return handle
+end
+
+-- Runs a backend-provided command (for example pg_dump) without materialising
+-- a temporary SQL script. Definition requests get their own session-local
+-- slot, so refreshing DDL never cancels a user query or catalog request.
+function M.run_argv(snapshot_or_bufnr, request, callback)
+	local snapshot = snapshot_for(snapshot_or_bufnr)
+	request = request or {}
+	if snapshot.connection == nil then
+		callback(1, "", "dbsh.nvim: no current connection")
+		return nil
+	end
+	if type(request.argv) ~= "table" or #request.argv == 0 then
+		callback(1, "", "dbsh.nvim: definition request has no argv")
+		return nil
+	end
+
+	local slot = "definition"
+	M.cancel(slot, snapshot)
+
+	local slots = slots_for(snapshot, true)
+	local operation = {}
+	slots[slot] = operation
+	local handle = M.runner(
+		request.argv,
+		{
+			text = true,
+			timeout = request.timeout or config.options().query_timeout,
+			env = request.env or {},
+		},
+		vim.schedule_wrap(function(obj)
 			local current_slots = slots_for(snapshot, false)
 			if current_slots == nil then
 				return
