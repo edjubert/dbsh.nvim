@@ -2,6 +2,7 @@
 -- declare them, asking the user for each value it does not have yet.
 
 local config = require("dbsh.config")
+local context = require("dbsh.context")
 local history = require("dbsh.history")
 local variables = require("dbsh.variables")
 
@@ -15,7 +16,12 @@ end
 
 -- callback(preamble) gets nil when the user gives up on any prompt: a
 -- half-parameterised query must never run.
-function M.preamble(sql, callback)
+function M.preamble(sql, snapshot, callback)
+	if callback == nil then
+		callback = snapshot
+		snapshot = context.snapshot(0)
+	end
+
 	local names = variables.detect(sql, config.options().variable_patterns)
 	if #names == 0 then
 		-- Synchronous on purpose: without variables the query path has to
@@ -24,12 +30,12 @@ function M.preamble(sql, callback)
 		return
 	end
 
-	local connection = config.current_name()
+	local connection = snapshot.connection_name
 	local values = {}
 
 	local function ask(index)
 		if index > #names then
-			local backend, err = config.backend()
+			local backend, err = context.backend(snapshot)
 			if backend == nil then
 				vim.notify("dbsh.nvim: " .. err, vim.log.levels.ERROR)
 				callback(nil)

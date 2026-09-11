@@ -2,6 +2,7 @@ local helpers = dofile("tests/helpers.lua")
 local eq, expect_match = helpers.eq, helpers.expect_match
 
 local config = require("dbsh.config")
+local context = require("dbsh.context")
 local exec = require("dbsh.exec")
 local export = require("dbsh.export")
 
@@ -27,6 +28,7 @@ local T = MiniTest.new_set({
 				},
 				default = "local_db",
 			})
+			context.setup()
 			original_runner = exec.runner
 			tmpdir = vim.fn.tempname()
 			vim.fn.mkdir(tmpdir, "p")
@@ -129,6 +131,7 @@ T["reports an unresolvable backend without running anything"] = function()
 		connections = { weird = { type = "oracle", host = "h", port = 1, database = "d", username = "u" } },
 		default = "weird",
 	})
+	context.setup()
 	local err
 	export.run("SELECT 1;", vim.fs.joinpath(tmpdir, "out.csv"), nil, function(_, e) err = e end)
 	vim.wait(500, function() return err ~= nil end)

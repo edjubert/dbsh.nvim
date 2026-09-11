@@ -1,7 +1,7 @@
 -- Persistent SQL scratchpad, one file per connection.
 -- A real file on disk, not a scratch buffer, so LSP and formatting work.
 
-local config = require("dbsh.config")
+local context = require("dbsh.context")
 
 local M = {}
 
@@ -14,7 +14,7 @@ function M.path(name)
 end
 
 function M.open()
-	local name = config.current_name() or "default"
+	local name = context.snapshot(0).connection_name or "default"
 	-- "p" makes mkdir idempotent: no error when the directory already exists.
 	vim.fn.mkdir(M.dir(), "p")
 

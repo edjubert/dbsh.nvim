@@ -3,6 +3,7 @@
 -- which query makes its CLI print CSV on stdout, and we save what comes back.
 
 local config = require("dbsh.config")
+local context = require("dbsh.context")
 local exec = require("dbsh.exec")
 
 local M = {}
@@ -44,8 +45,9 @@ end
 
 -- preamble holds the backend directives declaring the query variables; they
 -- must run before the export query, never inside it. callback(path, err)
-function M.run(sql, path, preamble, callback)
-	local backend, err = config.backend()
+function M.run(sql, path, preamble, callback, snapshot)
+	snapshot = snapshot or context.snapshot(0)
+	local backend, err = context.backend(snapshot)
 	if backend == nil then
 		callback(nil, err)
 		return
@@ -53,7 +55,7 @@ function M.run(sql, path, preamble, callback)
 
 	local query = backend.export_query(sql, config.options().csv_delimiter)
 	-- Raw mode: no decoration, so stdout is the CSV itself.
-	exec.run((preamble or "") .. query, { mode = "raw" }, function(code, stdout, stderr)
+	exec.run((preamble or "") .. query, { mode = "raw", context = snapshot }, function(code, stdout, stderr)
 		if code ~= 0 then
 			callback(nil, stderr ~= "" and stderr or "the query exited with code " .. tostring(code))
 			return

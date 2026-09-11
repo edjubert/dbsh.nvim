@@ -166,6 +166,7 @@ T["levels"] = MiniTest.new_set({
 				},
 				default = "local_db",
 			})
+			require("dbsh.context").setup()
 			original_runner = require("dbsh.exec").runner
 		end,
 		post_case = function()

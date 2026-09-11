@@ -2,6 +2,7 @@ local helpers = dofile("tests/helpers.lua")
 local eq = helpers.eq
 
 local config = require("dbsh.config")
+local context = require("dbsh.context")
 local scratch = require("dbsh.scratch")
 
 local T = MiniTest.new_set({
@@ -13,6 +14,7 @@ local T = MiniTest.new_set({
 				},
 				default = "local_db",
 			})
+			context.setup()
 		end,
 	},
 })
@@ -39,6 +41,7 @@ end
 
 T["uses the default scratchpad when no connection is selected"] = function()
 	config.setup({ connections = {} })
+	context.setup()
 	local path = scratch.open()
 	eq(path, scratch.path("default"))
 end

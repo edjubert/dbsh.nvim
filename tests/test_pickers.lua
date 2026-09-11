@@ -2,6 +2,7 @@ local helpers = dofile("tests/helpers.lua")
 local eq, expect_match = helpers.eq, helpers.expect_match
 
 local config = require("dbsh.config")
+local context = require("dbsh.context")
 local pickers = require("dbsh.telescope.pickers")
 
 local T = MiniTest.new_set()
@@ -174,6 +175,47 @@ local function connect()
 		},
 		default = "local_db",
 	})
+	context.setup()
+end
+
+T["binds the active buffer when selecting a connection"] = function()
+	config.setup({
+		connections = {
+			local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
+			staging = { host = "db.example.com", port = 5432, database = "app", username = "readonly" },
+		},
+		default = "local_db",
+	})
+	context.setup()
+
+	local maps = {}
+	local fake = {
+		pickers = {
+			new = function(_, opts)
+				return {
+					find = function()
+						assert(opts.attach_mappings(1, function(mode, key, handler)
+							maps[mode .. "|" .. key] = handler
+						end))
+					end,
+				}
+			end,
+		},
+		finders = { new_table = function(_) return {} end },
+		conf = { generic_sorter = function(_) return {} end },
+		actions = { close = function() end },
+		state = { get_selected_entry = function() return { value = "staging" } end },
+	}
+	local original_telescope, original_notify = pickers._telescope, vim.notify
+	pickers._telescope = function() return fake end
+	vim.notify = function() end
+
+	pickers.connections()
+	maps["i|<CR>"]()
+
+	vim.notify = original_notify
+	pickers._telescope = original_telescope
+	eq(context.current(0).connection_name, "staging")
 end
 
 T["reports a level the backend does not declare"] = function()
@@ -196,19 +238,19 @@ end
 
 T["fixes the connection level when selecting a set_level item"] = function()
 	connect()
-	local backend = config.backend()
+	local backend = assert(context.backend(context.snapshot(0)))
 	local original_notify = vim.notify
 	vim.notify = function() end
 
 	pickers.select(backend, 1, {}, "analytics")
 
 	vim.notify = original_notify
-	eq(config.current().database, "analytics")
+	eq(context.current(0).connection.database, "analytics")
 end
 
 T["descends into the next level with an enriched context"] = function()
 	connect()
-	local backend = config.backend()
+	local backend = assert(context.backend(context.snapshot(0)))
 	local original_level = pickers.level
 	local seen
 	pickers.level = function(index, ctx) seen = { index = index, ctx = ctx } end
@@ -221,7 +263,7 @@ end
 
 T["hands the selected item to the leaf handler"] = function()
 	connect()
-	local backend = config.backend()
+	local backend = assert(context.backend(context.snapshot(0)))
 	local dbsh = require("dbsh")
 	local original_query = dbsh.query
 	local asked

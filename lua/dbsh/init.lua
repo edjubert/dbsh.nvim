@@ -1,6 +1,7 @@
 -- Public API and user commands for dbsh.nvim.
 
 local config = require("dbsh.config")
+local context = require("dbsh.context")
 local exec = require("dbsh.exec")
 local results = require("dbsh.results")
 local scratch = require("dbsh.scratch")
@@ -11,8 +12,6 @@ local lsp = require("dbsh.lsp")
 
 local M = {}
 
--- Last query handed to M.query(), reused by the CSV export when the result
--- buffer is the active one.
 local last_query = nil
 
 function M.last_query()
@@ -26,28 +25,23 @@ function M.query(sql)
 		return
 	end
 
+	local snapshot = context.snapshot(0)
 	last_query = sql
-	resolve.preamble(sql, function(preamble)
-		-- nil means the user dismissed a prompt: run nothing, say nothing.
+	resolve.preamble(sql, snapshot, function(preamble)
 		if preamble == nil then
 			return
 		end
 
-		-- The result buffer shows the query as written; only psql sees the
-		-- \set directives.
 		local split_opts = { split = config.options().results_split }
 		results.running(sql, split_opts)
-		exec.run(preamble .. sql, {}, function(code, stdout, stderr)
+		exec.run(preamble .. sql, { context = snapshot }, function(code, stdout, stderr)
 			local output = stdout
 			if code ~= 0 then
 				output = stderr ~= "" and stderr or stdout
 			end
 			results.render(sql, output, split_opts)
-			-- Any successful statement may have been DDL. dbsh does not parse
-			-- SQL to find out, so it refreshes unconditionally; exec.run has
-			-- already dropped callbacks from a connection we left.
 			if code == 0 then
-				lsp.invalidate()
+				lsp.invalidate_external(snapshot)
 			end
 		end)
 	end)
@@ -59,8 +53,6 @@ function M.query_current_line()
 	M.query(line)
 end
 
--- Pure helper: expands from lnum to the surrounding blank lines.
--- Returns 1-based inclusive bounds.
 function M.paragraph_range(lines, lnum)
 	local start = lnum
 	while start > 1 and vim.trim(lines[start - 1] or "") ~= "" do
@@ -83,7 +75,6 @@ function M.query_paragraph()
 end
 
 function M.query_selection()
-	-- getregion replaces the ~50 line helper the upstream kept in lua/util.
 	local mode = vim.fn.mode()
 	local region = vim.fn.getregion(vim.fn.getpos("v"), vim.fn.getpos("."), { type = mode })
 	M.query(table.concat(region, "\n"))
@@ -97,9 +88,6 @@ function M.yank_cell()
 	vim.api.nvim_feedkeys("llv`zy", "n", false)
 end
 
--- Registers a yank has to land in for 'clipboard' to be honoured. Writing
--- to the unnamed register alone is not enough: under unnamedplus every put
--- reads from +, which setreg('"') leaves untouched.
 function M.yank_registers(clipboard)
 	local names = { '"' }
 	for _, item in ipairs(vim.split(clipboard or "", ",", { plain = true })) do
@@ -112,9 +100,6 @@ function M.yank_registers(clipboard)
 	return names
 end
 
--- Copies the selected cells of the result table as CSV into the default
--- register, and into the clipboard registers 'clipboard' asks for.
--- V takes whole rows, <C-v> takes only the columns of the block.
 function M.yank_csv()
 	local mode = vim.fn.mode()
 	if mode ~= csv.LINEWISE and mode ~= csv.BLOCKWISE then
@@ -125,8 +110,6 @@ function M.yank_csv()
 		return
 	end
 
-	-- getpos("v") and getpos(".") work during visual mode, unlike the '< '>
-	-- marks, which only get set once visual mode is left.
 	local from = vim.fn.getpos("v")
 	local to = vim.fn.getpos(".")
 	local lines = vim.api.nvim_buf_get_lines(
@@ -154,9 +137,6 @@ function M.yank_csv()
 	vim.notify(string.format("dbsh.nvim: yanked %d row(s) as CSV", #rows))
 end
 
--- The result buffer exports the query it is showing. Any other buffer
--- exports the given range -- which is how a visual selection reaches a user
--- command -- or the SQL paragraph under the cursor when no range is given.
 local function query_to_export(opts)
 	local name = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ":t")
 	if name == "__DBSH__" then
@@ -173,7 +153,6 @@ local function query_to_export(opts)
 	return table.concat(vim.list_slice(lines, start, stop), "\n")
 end
 
--- opts is the user command table, or nil when called straight from Lua.
 function M.export_csv(opts)
 	local sql = vim.trim(query_to_export(opts) or "")
 	if sql == "" then
@@ -181,9 +160,8 @@ function M.export_csv(opts)
 		return
 	end
 
-	-- Variables first, destination second: dismissing a prompt must not
-	-- ask for a path that will never be used.
-	resolve.preamble(sql, function(preamble)
+	local snapshot = context.snapshot(0)
+	resolve.preamble(sql, snapshot, function(preamble)
 		if preamble == nil then
 			return
 		end
@@ -192,7 +170,7 @@ function M.export_csv(opts)
 		vim.fn.mkdir(dir, "p")
 		local suggestion = export.default_path(
 			dir,
-			config.current_name() or "scratchpad",
+			snapshot.connection_name or "scratchpad",
 			os.date("%Y%m%d")
 		)
 
@@ -202,7 +180,6 @@ function M.export_csv(opts)
 				if choice == nil or vim.trim(choice) == "" then
 					return
 				end
-				-- The suggestion may have been edited onto an existing file.
 				local path = export.free_path(vim.trim(choice))
 				export.run(sql, path, preamble, function(written, err)
 					if err ~= nil then
@@ -210,32 +187,25 @@ function M.export_csv(opts)
 						return
 					end
 					vim.notify("dbsh.nvim: exported to " .. written)
-				end)
+				end, snapshot)
 			end
 		)
 	end)
 end
 
 local function pickers()
-	-- Deferred require: dbsh.telescope.pickers requires this module back.
 	return require("dbsh.telescope.pickers")
 end
 
--- Names of the catalog commands currently declared, so a connection change can
--- take them down before putting the new ones up.
 local level_commands = {}
 
--- The catalog is backend-specific: a Mongo connection has no schema level, and
--- offering :DbSchemas there would only produce an empty picker. So the commands
--- are derived from what the backend declares, and redeclared when it changes.
 local function declare_level_commands()
 	for _, name in ipairs(level_commands) do
-		-- pcall: deleting a command that is not declared raises.
 		pcall(vim.api.nvim_del_user_command, name)
 	end
 	level_commands = {}
 
-	local backend = config.backend()
+	local backend = context.backend(context.snapshot(0))
 	if backend == nil then
 		return
 	end
@@ -249,7 +219,6 @@ local function declare_level_commands()
 	end
 end
 
--- Everything here works the same whatever the connection drives.
 local function declare_commands()
 	local command = vim.api.nvim_create_user_command
 
@@ -262,57 +231,56 @@ local function declare_commands()
 			vim.notify("dbsh.nvim: no result yet", vim.log.levels.WARN)
 		end
 	end, {})
-	-- range = true: typing : in visual mode prefills '<,'>, which would
-	-- otherwise fail with E481 before the command even runs.
 	command("DbExportCSV", function(opts) M.export_csv(opts) end, { range = true })
 
 	command("DbInfo", function()
-		local name = config.current_name()
-		if name == nil then
+		local snapshot = context.snapshot(0)
+		local connection = snapshot.connection
+		if connection == nil or snapshot.connection_name == nil then
 			vim.notify("dbsh.nvim: no current connection", vim.log.levels.WARN)
 			return
 		end
-		local conn = config.current()
 		vim.notify(string.format(
 			"dbsh.nvim: %s -> %s@%s:%s/%s",
-			name, conn.username, conn.host, tostring(conn.port), conn.database))
+			snapshot.connection_name,
+			connection.username,
+			connection.host,
+			tostring(connection.port),
+			connection.database
+		))
 	end, {})
 end
 
 function M.setup(opts)
 	config.setup(opts)
+	context.setup()
 	declare_commands()
 
-	-- Created once and reused: clearing the group again would wipe the
-	-- autocommands declared just above it.
 	local group = vim.api.nvim_create_augroup("dbsh", { clear = true })
-
-	-- config.setup selects the default connection, and therefore fires the
-	-- event, before this autocommand exists: the first declaration is explicit.
 	vim.api.nvim_create_autocmd("User", {
-		pattern = "DbshConnectionChanged",
+		pattern = "DbshContextChanged",
 		group = group,
 		callback = declare_level_commands,
 	})
 	declare_level_commands()
 
-	-- Same reason for the explicit call: the default connection was selected
-	-- before this autocommand existed.
 	vim.api.nvim_create_autocmd("User", {
-		pattern = "DbshConnectionChanged",
+		pattern = "DbshContextChanged",
 		group = group,
-		callback = function()
-			lsp.sync()
+		callback = function(args)
+			local bufnr = args.data and args.data.bufnr or 0
+			lsp.sync_external(context.snapshot(bufnr))
 		end,
 	})
-	lsp.sync()
+	lsp.sync_external(context.snapshot(0))
 
-	-- The other direction: a client attaching after the last connection change
-	-- would otherwise stay on the database of its own configuration file.
 	vim.api.nvim_create_autocmd("LspAttach", {
 		group = group,
 		callback = function(args)
-			lsp.sync_client(vim.lsp.get_client_by_id(args.data.client_id))
+			lsp.sync_external_client(
+				vim.lsp.get_client_by_id(args.data.client_id),
+				context.snapshot(args.buf)
+			)
 		end,
 	})
 end
