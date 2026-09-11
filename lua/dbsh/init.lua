@@ -7,6 +7,7 @@ local scratch = require("dbsh.scratch")
 local csv = require("dbsh.csv")
 local export = require("dbsh.export")
 local resolve = require("dbsh.resolve")
+local lsp = require("dbsh.lsp")
 
 local M = {}
 
@@ -42,6 +43,12 @@ function M.query(sql)
 				output = stderr ~= "" and stderr or stdout
 			end
 			results.render(sql, output, split_opts)
+			-- Any successful statement may have been DDL. dbsh does not parse
+			-- SQL to find out, so it refreshes unconditionally; exec.run has
+			-- already dropped callbacks from a connection we left.
+			if code == 0 then
+				lsp.invalidate()
+			end
 		end)
 	end)
 end
@@ -276,14 +283,38 @@ function M.setup(opts)
 	config.setup(opts)
 	declare_commands()
 
+	-- Created once and reused: clearing the group again would wipe the
+	-- autocommands declared just above it.
+	local group = vim.api.nvim_create_augroup("dbsh", { clear = true })
+
 	-- config.setup selects the default connection, and therefore fires the
 	-- event, before this autocommand exists: the first declaration is explicit.
 	vim.api.nvim_create_autocmd("User", {
 		pattern = "DbshConnectionChanged",
-		group = vim.api.nvim_create_augroup("dbsh", { clear = true }),
+		group = group,
 		callback = declare_level_commands,
 	})
 	declare_level_commands()
+
+	-- Same reason for the explicit call: the default connection was selected
+	-- before this autocommand existed.
+	vim.api.nvim_create_autocmd("User", {
+		pattern = "DbshConnectionChanged",
+		group = group,
+		callback = function()
+			lsp.sync()
+		end,
+	})
+	lsp.sync()
+
+	-- The other direction: a client attaching after the last connection change
+	-- would otherwise stay on the database of its own configuration file.
+	vim.api.nvim_create_autocmd("LspAttach", {
+		group = group,
+		callback = function(args)
+			lsp.sync_client(vim.lsp.get_client_by_id(args.data.client_id))
+		end,
+	})
 end
 
 return M

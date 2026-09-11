@@ -56,6 +56,28 @@ function M.env(conn, options)
 	return { PGCONNECT_TIMEOUT = tostring((options or {}).connect_timeout or 5) }
 end
 
+-- The language server dbsh steers for this backend, and how to talk to it.
+-- Absent on a backend with no server: the caller then does nothing at all.
+M.lsp = {
+	client_name = "postgres_lsp",
+	invalidate_command = "pgls.invalidateSchemaCache",
+	-- Free-form: each server names its own settings. No password here -- the
+	-- server merges only the fields it receives, so the one declared in the
+	-- project file or in PGPASSWORD survives, and no secret ever reaches the
+	-- Neovim LSP log.
+	settings = function(conn, options)
+		return {
+			db = {
+				host = conn.host,
+				port = conn.port,
+				username = conn.username,
+				database = conn.database,
+				connTimeoutSecs = (options or {}).connect_timeout or 5,
+			},
+		}
+	end,
+}
+
 -- Raw mode output: one row per line, cells separated by a tab.
 function M.parse_raw(stdout)
 	local rows = {}

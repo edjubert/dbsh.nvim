@@ -25,6 +25,9 @@ local defaults = {
 	-- Lua patterns, each with a single capture giving the variable name.
 	-- Empty by default: no SQL file changes behaviour unless asked.
 	variable_patterns = {},
+	-- Steers an already-running language server at the current connection.
+	-- Off by default: it talks to a client dbsh does not own.
+	lsp = { enabled = false },
 }
 
 M.state = {
@@ -113,6 +116,9 @@ function M.set_level(key, value)
 	end
 	M.state.current[key] = value
 	M.state.generation = M.state.generation + 1
+	-- A level change is a connection change for everything downstream: the
+	-- catalog commands and the language server both key off this event.
+	announce_connection_change()
 	return M.state.current
 end
 
