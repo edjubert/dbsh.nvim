@@ -79,10 +79,18 @@ local T = MiniTest.new_set({
 				attach_client = lsp.attach_client,
 				request = lsp.request,
 				stop_client = lsp.stop_client,
+				detach_client = lsp.detach_client,
+				reset_diagnostics = lsp.reset_diagnostics,
+				schedule_timer = lsp.schedule_timer,
+				cancel_timer = lsp.cancel_timer,
+				sync_external = lsp.sync_external,
+				reconcile_managed = lsp.reconcile_managed,
 				notify = vim.notify,
 			}
 			lsp._warned = { env = false, command = false, failures = {} }
 			lsp.setup()
+			lsp.detach_client = function() return true end
+			lsp.reset_diagnostics = function() end
 			active_snapshot = setup_with({ enabled = true })
 		end,
 		post_case = function()
@@ -92,6 +100,12 @@ local T = MiniTest.new_set({
 			lsp.attach_client = originals.attach_client
 			lsp.request = originals.request
 			lsp.stop_client = originals.stop_client
+			lsp.detach_client = originals.detach_client
+			lsp.reset_diagnostics = originals.reset_diagnostics
+			lsp.schedule_timer = originals.schedule_timer
+			lsp.cancel_timer = originals.cancel_timer
+			lsp.sync_external = originals.sync_external
+			lsp.reconcile_managed = originals.reconcile_managed
 			vim.notify = originals.notify
 			vim.env.PGDATABASE = nil
 			lsp.setup()
@@ -369,6 +383,261 @@ T["passes an absolute patched binary command unchanged without exposing it in st
 	eq(started.cmd, command)
 	eq(vim.inspect(lsp.status()):find("/tmp/pgls", 1, true), nil)
 	vim.api.nvim_buf_delete(buf, { force = true })
+end
+
+T["dispatches context changes by mode without mixing external and managed clients"] = function()
+	local external_calls, managed_calls = 0, 0
+	lsp.sync_external = function() external_calls = external_calls + 1 end
+	lsp.reconcile_managed = function() managed_calls = managed_calls + 1 end
+
+	lsp.on_context_changed(active_snapshot.bufnr, active_snapshot)
+	eq(external_calls, 1)
+	eq(managed_calls, 0)
+
+	local managed = managed_snapshot(vim.api.nvim_get_current_buf())
+	lsp.on_context_changed(managed.bufnr, managed)
+	eq(external_calls, 1)
+	eq(managed_calls, 1)
+
+	local off = setup_with({ mode = "off" })
+	lsp.on_context_changed(off.bufnr, off)
+	eq(external_calls, 1)
+	eq(managed_calls, 1)
+end
+
+T["reconciles a changed buffer context without stopping a shared client"] = function()
+	local first = vim.api.nvim_create_buf(false, true)
+	local second = vim.api.nvim_create_buf(false, true)
+	local original = managed_snapshot(first)
+	local shared = vim.deepcopy(original)
+	shared.bufnr = second
+	local changed = vim.deepcopy(original)
+	changed.levels.schema = "reporting"
+	local starts, attached, detached, reset, stopped = 0, {}, {}, {}, {}
+	lsp.start_client = function()
+		starts = starts + 1
+		return fake_client(starts)
+	end
+	lsp.attach_client = function(client_id, bufnr)
+		table.insert(attached, { client_id = client_id, bufnr = bufnr })
+		return true
+	end
+	lsp.detach_client = function(client_id, bufnr)
+		table.insert(detached, { client_id = client_id, bufnr = bufnr })
+	end
+	lsp.reset_diagnostics = function(client_id, bufnr)
+		table.insert(reset, { client_id = client_id, bufnr = bufnr })
+	end
+	lsp.stop_client = function(client_id) table.insert(stopped, client_id) end
+	lsp.request = function(_, _, _, handler)
+		handler(nil, nil)
+		return true
+	end
+
+	lsp.reconcile_managed(first, original)
+	lsp.reconcile_managed(second, shared)
+	lsp.reconcile_managed(first, changed)
+
+	eq(starts, 2)
+	eq(detached, { { client_id = 1, bufnr = first } })
+	eq(reset, { { client_id = 1, bufnr = first } })
+	eq(stopped, {})
+	eq(attached, {
+		{ client_id = 1, bufnr = first },
+		{ client_id = 1, bufnr = second },
+		{ client_id = 2, bufnr = first },
+	})
+	local records = lsp.status().clients
+	eq(#records, 2)
+	eq(vim.inspect(records):find("never%-send"), nil)
+	vim.api.nvim_buf_delete(first, { force = true })
+	vim.api.nvim_buf_delete(second, { force = true })
+end
+
+T["keeps an unchanged managed key attached once"] = function()
+	local buf = vim.api.nvim_create_buf(false, true)
+	local snapshot = managed_snapshot(buf)
+	local starts, attached = 0, 0
+	lsp.start_client = function()
+		starts = starts + 1
+		return fake_client(42)
+	end
+	lsp.attach_client = function()
+		attached = attached + 1
+		return true
+	end
+	lsp.request = function(_, _, _, handler)
+		handler(nil, nil)
+		return true
+	end
+
+	lsp.reconcile_managed(buf, snapshot)
+	lsp.reconcile_managed(buf, snapshot)
+
+	eq(starts, 1)
+	eq(attached, 1)
+	vim.api.nvim_buf_delete(buf, { force = true })
+end
+
+T["normalizes the current buffer before tracking a managed reference"] = function()
+	local buf = vim.api.nvim_get_current_buf()
+	local snapshot = managed_snapshot(buf)
+	local attached
+	lsp.start_client = function() return fake_client(42) end
+	lsp.attach_client = function(_, bufnr)
+		attached = bufnr
+		return true
+	end
+	lsp.request = function(_, _, _, handler)
+		handler(nil, nil)
+		return true
+	end
+
+	lsp.reconcile_managed(0, snapshot)
+
+	eq(attached, buf)
+	eq(lsp.status().clients[1].buffers, { buf })
+end
+
+T["stops only after the last immediate managed reference detaches"] = function()
+	local first = vim.api.nvim_create_buf(false, true)
+	local second = vim.api.nvim_create_buf(false, true)
+	local snapshot = managed_snapshot(first)
+	local shared = vim.deepcopy(snapshot)
+	shared.bufnr = second
+	local detached, reset, stopped = {}, {}, {}
+	lsp.start_client = function() return fake_client(42) end
+	lsp.attach_client = function() return true end
+	lsp.detach_client = function(client_id, bufnr)
+		table.insert(detached, { client_id = client_id, bufnr = bufnr })
+	end
+	lsp.reset_diagnostics = function(client_id, bufnr)
+		table.insert(reset, { client_id = client_id, bufnr = bufnr })
+	end
+	lsp.stop_client = function(client_id) table.insert(stopped, client_id) end
+	lsp.request = function(_, _, _, handler)
+		handler(nil, nil)
+		return true
+	end
+
+	lsp.reconcile_managed(first, snapshot)
+	lsp.reconcile_managed(second, shared)
+	lsp.detach_managed(first)
+	eq(stopped, {})
+	lsp.detach_managed(second)
+
+	eq(detached, { { client_id = 42, bufnr = first }, { client_id = 42, bufnr = second } })
+	eq(reset, detached)
+	eq(stopped, { 42 })
+	eq(lsp.status().clients, {})
+	vim.api.nvim_buf_delete(first, { force = true })
+	vim.api.nvim_buf_delete(second, { force = true })
+end
+
+T["cancels an idle retirement when a managed buffer reattaches"] = function()
+	local buf = vim.api.nvim_create_buf(false, true)
+	local snapshot = managed_snapshot(buf, {
+		mode = "managed",
+		client_pool = { strategy = "idle", idle_timeout_ms = 25 },
+	})
+	local timers, stopped = {}, {}
+	lsp.start_client = function() return fake_client(42) end
+	lsp.attach_client = function() return true end
+	lsp.detach_client = function() end
+	lsp.reset_diagnostics = function() end
+	lsp.stop_client = function(client_id) table.insert(stopped, client_id) end
+	lsp.request = function(_, _, _, handler)
+		handler(nil, nil)
+		return true
+	end
+	lsp.schedule_timer = function(timeout, callback)
+		local timer = { timeout = timeout, callback = callback }
+		table.insert(timers, timer)
+		return timer
+	end
+	lsp.cancel_timer = function(timer) timer.cancelled = true end
+
+	lsp.reconcile_managed(buf, snapshot)
+	lsp.detach_managed(buf)
+	lsp.detach_managed(buf)
+	eq(#timers, 1)
+	eq(timers[1].timeout, 25)
+	lsp.reconcile_managed(buf, snapshot)
+	eq(timers[1].cancelled, true)
+	timers[1].callback()
+	eq(stopped, {})
+
+	lsp.detach_managed(buf)
+	eq(#timers, 2)
+	timers[2].callback()
+	eq(stopped, { 42 })
+	vim.api.nvim_buf_delete(buf, { force = true })
+end
+
+T["keeps session clients until managed shutdown"] = function()
+	local buf = vim.api.nvim_create_buf(false, true)
+	local snapshot = managed_snapshot(buf, {
+		mode = "managed",
+		client_pool = { strategy = "session", idle_timeout_ms = 0 },
+	})
+	local stopped = {}
+	lsp.start_client = function() return fake_client(42) end
+	lsp.attach_client = function() return true end
+	lsp.detach_client = function() end
+	lsp.reset_diagnostics = function() end
+	lsp.stop_client = function(client_id) table.insert(stopped, client_id) end
+	lsp.request = function(_, _, _, handler)
+		handler(nil, nil)
+		return true
+	end
+
+	lsp.reconcile_managed(buf, snapshot)
+	lsp.detach_managed(buf)
+	eq(stopped, {})
+	lsp.shutdown_managed()
+	eq(stopped, { 42 })
+	vim.api.nvim_buf_delete(buf, { force = true })
+end
+
+T["notifies once for repeated failures of the same managed key"] = function()
+	local buf = vim.api.nvim_create_buf(false, true)
+	local snapshot = managed_snapshot(buf)
+	local notices = 0
+	local original_notify = vim.notify
+	lsp.start_client = function() return fake_client(42) end
+	lsp.attach_client = function() return true end
+	lsp.request = function(_, _, _, handler)
+		handler({ code = -32000, message = "connection failed" }, nil)
+		return true
+	end
+	vim.notify = function(_, level)
+		if level == vim.log.levels.WARN then
+			notices = notices + 1
+		end
+	end
+
+	lsp.attach_managed(buf, snapshot)
+	lsp.attach_managed(buf, snapshot)
+
+	vim.notify = original_notify
+	eq(notices, 1)
+	eq(lsp.status().clients[1].state, "failed")
+	vim.api.nvim_buf_delete(buf, { force = true })
+end
+
+T["reports a redacted external status with last-synchronized context wins"] = function()
+	local client = fake_client(1)
+	client.settings = { db = { password = "kept" } }
+	lsp._clients = function() return { client } end
+
+	lsp.sync_external(active_snapshot)
+
+	local status = lsp.status(active_snapshot)
+	local message = lsp.status_message(active_snapshot)
+	eq(status.external.database, "postgres")
+	eq(vim.inspect(status):find("kept", 1, true), nil)
+	eq(message:find("user-owned", 1, true) ~= nil, true)
+	eq(message:find("last-synchronized context wins", 1, true) ~= nil, true)
 end
 
 T["keeps the schema-cache message handler narrow"] = function()

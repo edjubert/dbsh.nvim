@@ -86,7 +86,33 @@ notifications passent par `vim.notify` avec le préfixe standard.
 Les tests MiniTest se lancent avec `make test`. Utiliser un fichier
 `tests/test_<module>.lua`, `tests/helpers.lua`, et `vim.wait` pour l’asynchrone.
 Les coutures de test sont des champs réassignables : `exec.runner`,
-`pickers._telescope`, les tables LSP, et les modules purs (`safety.classify`,
-constructeurs de requêtes backend). Restaurer toute injection dans les hooks.
+`pickers._telescope`, les coutures LSP (`start_client`, `attach_client`,
+`detach_client`, `request`, `stop_client`, diagnostics et timers), et les
+modules purs (`safety.classify`, constructeurs de requêtes backend). Restaurer
+toute injection dans les hooks.
+
+## PgLS
+
+`lsp.mode` vaut `off`, `external` ou `managed`. Le booléen historique
+`lsp.enabled = true` reste un alias déprécié de `external`; la valeur `false`
+reste `off`. Le chemin `external` cible exclusivement un client PgLS appartenant
+à l'utilisateur : notification de configuration sans mot de passe et
+invalidation du cache après requête, sans jamais gérer son cycle de vie. Son
+statut doit rappeler la limitation **last-synchronized context wins**.
+
+Le chemin `managed` ne concerne que PostgreSQL. Il possède les clients natifs
+Neovim, indexés par l’empreinte publique de connexion, la base effective, la
+racine de projet et le `search_path` résolu. Le mot de passe reste en mémoire et
+ne transite que par `pgls/setDatabaseContext`; il ne doit jamais apparaître dans
+une clé, un statut, une notification, un log ou une configuration persistée.
+Les stratégies de pool sont `immediate`, `idle` et `session`. La réconciliation
+de contexte ne détache que les clients gérés, et réinitialise uniquement leur
+namespace de diagnostics.
+
+`DbLspStatus` affiche seulement l’état public du contexte actif. Le protocole
+requiert une version de PgLS contenant `pgls/setDatabaseContext`: livrer/merger
+d’abord cette évolution PgLS, puis dbsh. Un binaire local patché via
+`lsp.command` est autorisé uniquement pour le développement et la revue, jamais
+dans une configuration partagée.
 
 Les commits suivent Conventional Commits, en anglais.
