@@ -472,9 +472,9 @@ end
 
 T["refreshes the schema cache after a successful query"] = function()
 	local lsp = require("dbsh.lsp")
-	local original = lsp.invalidate_external
+	local original = lsp.invalidate
 	local snapshot
-	lsp.invalidate_external = function(value)
+	lsp.invalidate = function(value)
 		snapshot = value
 	end
 
@@ -490,7 +490,7 @@ T["refreshes the schema cache after a successful query"] = function()
 		return snapshot ~= nil
 	end)
 
-	lsp.invalidate_external = original
+	lsp.invalidate = original
 	eq(snapshot.id, context.snapshot(0).id)
 end
 
@@ -503,9 +503,9 @@ T["does not refresh the schema cache when the query fails"] = function()
 		safety = { mode = "off" },
 	})
 	local lsp = require("dbsh.lsp")
-	local original = lsp.invalidate_external
+	local original = lsp.invalidate
 	local calls = 0
-	lsp.invalidate_external = function()
+	lsp.invalidate = function()
 		calls = calls + 1
 	end
 
@@ -521,7 +521,7 @@ T["does not refresh the schema cache when the query fails"] = function()
 		return calls > 0
 	end)
 
-	lsp.invalidate_external = original
+	lsp.invalidate = original
 	eq(calls, 0)
 end
 
