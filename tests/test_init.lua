@@ -2,6 +2,7 @@ local helpers = dofile("tests/helpers.lua")
 local eq, expect_match = helpers.eq, helpers.expect_match
 
 local dbsh = require("dbsh")
+local context = require("dbsh.context")
 local exec = require("dbsh.exec")
 local results = require("dbsh.results")
 local csv = require("dbsh.csv")
@@ -76,11 +77,11 @@ T["drops the catalog commands of a connection with no backend"] = function()
 	})
 	eq(vim.fn.exists(":DbTables"), 2)
 
-	config.set_connection("weird")
+	assert(context.bind(0, "weird", "test"))
 	eq(vim.fn.exists(":DbTables"), 0)
 
 	-- And they come back when a usable connection does.
-	config.set_connection("local_db")
+	assert(context.bind(0, "local_db", "test"))
 	eq(vim.fn.exists(":DbTables"), 2)
 end
 
@@ -241,7 +242,7 @@ end
 T["sends the preamble to psql but renders only the query"] = function()
 	local resolve = require("dbsh.resolve")
 	local original_preamble = resolve.preamble
-	resolve.preamble = function(_, cb) cb("\\set raw_data 'public.events'\n") end
+	resolve.preamble = function(_, _, cb) cb("\\set raw_data 'public.events'\n") end
 
 	local script
 	exec.runner = function(argv, _, on_exit)
@@ -276,7 +277,7 @@ end
 T["runs nothing when the variable prompt is cancelled"] = function()
 	local resolve = require("dbsh.resolve")
 	local original_preamble = resolve.preamble
-	resolve.preamble = function(_, cb) cb(nil) end
+	resolve.preamble = function(_, _, cb) cb(nil) end
 
 	local ran = false
 	exec.runner = function(_, _, _)
@@ -297,7 +298,7 @@ T["hands the preamble to the csv export"] = function()
 	local original_preamble, original_run = resolve.preamble, export.run
 	local original_input, original_notify = vim.ui.input, vim.notify
 
-	resolve.preamble = function(_, cb) cb("\\set raw_data 'public.events'\n") end
+	resolve.preamble = function(_, _, cb) cb("\\set raw_data 'public.events'\n") end
 	vim.ui.input = function(_, cb) cb("/tmp/psql-variables-test.csv") end
 	vim.notify = function() end
 
@@ -323,9 +324,9 @@ end
 
 T["refreshes the schema cache after a successful query"] = function()
 	local lsp = require("dbsh.lsp")
-	local original = lsp.invalidate
+	local original = lsp.invalidate_external
 	local calls = 0
-	lsp.invalidate = function()
+	lsp.invalidate_external = function()
 		calls = calls + 1
 	end
 
@@ -341,15 +342,15 @@ T["refreshes the schema cache after a successful query"] = function()
 		return calls > 0
 	end)
 
-	lsp.invalidate = original
+	lsp.invalidate_external = original
 	eq(calls, 1)
 end
 
 T["does not refresh the schema cache when the query fails"] = function()
 	local lsp = require("dbsh.lsp")
-	local original = lsp.invalidate
+	local original = lsp.invalidate_external
 	local calls = 0
-	lsp.invalidate = function()
+	lsp.invalidate_external = function()
 		calls = calls + 1
 	end
 
@@ -365,7 +366,7 @@ T["does not refresh the schema cache when the query fails"] = function()
 		return calls > 0
 	end)
 
-	lsp.invalidate = original
+	lsp.invalidate_external = original
 	eq(calls, 0)
 end
 

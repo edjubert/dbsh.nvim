@@ -17,9 +17,8 @@ local T = MiniTest.new_set({
 	},
 })
 
-T["selects the default connection on setup"] = function()
-	eq(config.current_name(), "local_db")
-	eq(config.current().database, "postgres")
+T["keeps the configured default profile as static configuration"] = function()
+	eq(config.default_name(), "local_db")
 end
 
 T["applies default options"] = function()
@@ -32,17 +31,52 @@ T["lists connection names sorted"] = function()
 	eq(config.names(), { "local_db", "staging" })
 end
 
-T["bumps the generation when switching connection"] = function()
-	local before = config.generation()
-	config.set_connection("staging")
-	eq(config.current().host, "db.example.com")
-	eq(config.generation() > before, true)
+T["returns a deep copy of a declared connection"] = function()
+	local connection = assert(config.connection("local_db"))
+	connection.database = "analytics"
+
+	eq(config.options().connections.local_db.database, "postgres")
+	eq(assert(config.connection("local_db")).database, "postgres")
 end
 
-T["rejects an unknown connection"] = function()
-	local conn, err = config.set_connection("missing")
-	eq(conn, nil)
+T["rejects an unknown declared connection"] = function()
+	local connection, err = config.connection("missing")
+	eq(connection, nil)
 	expect_match(err, "unknown connection")
+end
+
+T["resolves postgres for a connection with no declared type"] = function()
+	local backend = assert(config.backend_for(assert(config.connection("local_db"))))
+	eq(backend, require("dbsh.backends.postgres"))
+end
+
+T["resolves the backend a connection declares"] = function()
+	config.setup({
+		connections = {
+			pg = { type = "postgres", host = "localhost", port = 5432, database = "postgres", username = "dev" },
+		},
+		default = "pg",
+	})
+
+	local backend = assert(config.backend_for(assert(config.connection("pg"))))
+	eq(backend, require("dbsh.backends.postgres"))
+end
+
+T["rejects a connection whose type has no backend"] = function()
+	config.setup({
+		connections = { weird = { type = "oracle", host = "h", port = 1, database = "d", username = "u" } },
+		default = "weird",
+	})
+
+	local backend, err = config.backend_for(assert(config.connection("weird")))
+	eq(backend, nil)
+	expect_match(err, "unknown connection type")
+end
+
+T["reports no connection when resolving a backend"] = function()
+	local backend, err = config.backend_for(nil)
+	eq(backend, nil)
+	expect_match(err, "no connection")
 end
 
 T["applies csv export defaults"] = function()
@@ -76,95 +110,8 @@ T["lets the user declare variable patterns"] = function()
 	eq(config.options().variable_patterns, { ":(raw_data)" })
 end
 
-T["resolves postgres for a connection with no declared type"] = function()
-	eq(config.backend(), require("dbsh.backends.postgres"))
-end
-
-T["resolves the backend a connection declares"] = function()
-	config.setup({
-		connections = {
-			pg = { type = "postgres", host = "localhost", port = 5432, database = "postgres", username = "dev" },
-		},
-		default = "pg",
-	})
-	eq(config.backend(), require("dbsh.backends.postgres"))
-end
-
-T["rejects a connection whose type has no backend"] = function()
-	config.setup({
-		connections = { weird = { type = "oracle", host = "h", port = 1, database = "d", username = "u" } },
-		default = "weird",
-	})
-	local backend, err = config.backend()
-	eq(backend, nil)
-	expect_match(err, "unknown connection type")
-end
-
-T["reports no current connection when resolving a backend"] = function()
-	config.setup({ connections = {} })
-	local backend, err = config.backend()
-	eq(backend, nil)
-	expect_match(err, "no current connection")
-end
-
-T["sets an arbitrary navigation level on the current connection"] = function()
-	config.set_level("schema", "analytics")
-	eq(config.current().schema, "analytics")
-end
-
-T["bumps the generation when setting a level"] = function()
-	local before = config.generation()
-	config.set_level("schema", "analytics")
-	eq(config.generation() > before, true)
-end
-
-T["setting a level does not mutate the declared connection"] = function()
-	config.set_level("database", "analytics")
-	eq(config.options().connections.local_db.database, "postgres")
-end
-
-T["reports an error when setting a level with no connection"] = function()
-	config.setup({ connections = {} })
-	local conn, err = config.set_level("database", "analytics")
-	eq(conn, nil)
-	expect_match(err, "no current connection")
-end
-
-T["announces a connection change"] = function()
-	local fired = 0
-	local group = vim.api.nvim_create_augroup("dbsh_test_config", { clear = true })
-	vim.api.nvim_create_autocmd("User", {
-		pattern = "DbshConnectionChanged",
-		group = group,
-		callback = function() fired = fired + 1 end,
-	})
-
-	config.set_connection("staging")
-	config.set_level("database", "analytics")
-
-	vim.api.nvim_del_augroup_by_id(group)
-	eq(fired, 2)
-end
-
 T["defaults the language server integration to off"] = function()
 	eq(config.options().lsp.enabled, false)
-end
-
-T["announces the change when fixing a navigation level"] = function()
-	local fired = 0
-	local group = vim.api.nvim_create_augroup("dbsh_test_level_event", { clear = true })
-	vim.api.nvim_create_autocmd("User", {
-		pattern = "DbshConnectionChanged",
-		group = group,
-		callback = function()
-			fired = fired + 1
-		end,
-	})
-
-	config.set_level("database", "other")
-
-	vim.api.nvim_del_augroup_by_id(group)
-	eq(fired, 1)
 end
 
 return T

@@ -5,6 +5,7 @@
 -- message when it is not installed.
 
 local config = require("dbsh.config")
+local context = require("dbsh.context")
 
 local M = {}
 
@@ -79,7 +80,7 @@ function M.connections()
 		entry_maker = plain_entry,
 		attach_mappings = function(bufnr, map)
 			bind_enter(t, bufnr, map, function(entry)
-				local _, err = config.set_connection(entry.value)
+				local _, err = context.bind(0, entry.value, "connections")
 				if err ~= nil then
 					notify_error(err)
 				else
@@ -97,7 +98,7 @@ end
 function M.select(backend, index, ctx, value)
 	local level = backend.levels[index]
 	if level.on_select == "set_level" then
-		local _, err = config.set_level(level.key, value)
+		local _, err = context.set_level(0, level.key, value, "catalog")
 		if err ~= nil then
 			notify_error(err)
 		else
@@ -121,7 +122,7 @@ function M.level(index, ctx)
 		return
 	end
 
-	local backend, err = config.backend()
+	local backend, err = context.backend(context.snapshot(0))
 	if backend == nil then
 		return notify_error(err)
 	end

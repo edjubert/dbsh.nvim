@@ -1,16 +1,13 @@
 -- Asynchronous CLI runner.
--- Never blocks the editor and never prompts for a password: everything the
--- invocation needs -- argv, environment, script preamble -- comes from the
--- backend of the current connection, so this module knows no CLI at all.
+-- Every invocation owns an immutable context snapshot, so callbacks cannot
+-- render into a buffer whose connection changed while the process was running.
 
 local config = require("dbsh.config")
+local context = require("dbsh.context")
 
 local M = {}
 
--- Injection point: tests replace this with a fake runner.
 M.runner = vim.system
-
--- One in-flight handle per slot, so opening a picker does not cancel a user query.
 M.slots = { user = nil, introspect = nil }
 
 function M.write_script(backend, sql, mode)
@@ -35,21 +32,24 @@ function M.cancel(slot)
 	end
 end
 
--- opts: { mode = "pretty"|"raw"?, slot = "user"|"introspect"?, timeout = number? }
+-- opts: {
+--   context = dbsh.context.snapshot()?,
+--   mode = "pretty"|"raw"?,
+--   slot = "user"|"introspect"?,
+--   timeout = number?,
+-- }
 -- callback(code, stdout, stderr)
 function M.run(sql, opts, callback)
 	opts = opts or {}
 	local slot = opts.slot or "user"
+	local snapshot = opts.context or context.snapshot(0)
 
-	local conn = config.current()
-	if conn == nil then
+	if snapshot.connection == nil then
 		callback(1, "", "dbsh.nvim: no current connection")
 		return nil
 	end
 
-	-- Resolved before cancelling anything: killing the running query only to
-	-- fail on a misconfigured connection would help nobody.
-	local backend, err = config.backend()
+	local backend, err = context.backend(snapshot)
 	if backend == nil then
 		callback(1, "", "dbsh.nvim: " .. err)
 		return nil
@@ -58,21 +58,18 @@ function M.run(sql, opts, callback)
 	M.cancel(slot)
 
 	local mode = opts.mode or "pretty"
-	local generation = config.generation()
 	local tmpfile = M.write_script(backend, sql, mode)
-
 	local handle = M.runner(
-		backend.argv(conn, tmpfile, mode),
+		backend.argv(snapshot.connection, tmpfile, mode),
 		{
 			text = true,
 			timeout = opts.timeout or config.options().query_timeout,
-			env = backend.env(conn, config.options()),
+			env = backend.env(snapshot.connection, config.options()),
 		},
 		vim.schedule_wrap(function(obj)
 			os.remove(tmpfile)
 			M.slots[slot] = nil
-			-- Drop results that belong to a connection we already left.
-			if generation ~= config.generation() then
+			if not context.is_current(snapshot) then
 				return
 			end
 			callback(obj.code, obj.stdout or "", obj.stderr or "")
