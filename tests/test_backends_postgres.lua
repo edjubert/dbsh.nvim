@@ -188,8 +188,13 @@ T["contracts"] = MiniTest.new_set({
 })
 
 -- Replaces the runner with one that immediately returns the given output.
-local function stub_output(stdout, code)
-	require("dbsh.exec").runner = function(_, _, on_exit)
+local function stub_output(stdout, code, on_run)
+	require("dbsh.exec").runner = function(argv, _, on_exit)
+		if on_run ~= nil then
+			local script = assert(io.open(argv[#argv], "r"))
+			on_run(script:read("*a"))
+			script:close()
+		end
 		vim.schedule(function()
 			on_exit({ code = code or 0, stdout = stdout, stderr = code == 0 and "" or "boom" })
 		end)
@@ -204,11 +209,32 @@ T["contracts"]["declares explicit context selectors and object catalogs"] = func
 	eq(type(postgres.contexts[1].apply), "function")
 	eq(postgres.contexts[2].key, "schema")
 	eq(postgres.contexts[2].command, "Schemas")
-	eq(#postgres.catalogs, 2)
-	eq(postgres.catalogs[1].key, "relations")
-	eq(postgres.catalogs[1].command, "Relations")
-	eq(postgres.catalogs[2].key, "tables")
-	eq(postgres.catalogs[2].command, "Tables")
+	eq(vim.tbl_map(function(definition) return definition.key end, postgres.catalogs), {
+		"relations",
+		"tables",
+		"columns",
+		"indexes",
+		"constraints",
+		"sequences",
+		"routines",
+		"types",
+		"policies",
+		"triggers",
+		"extensions",
+	})
+	eq(vim.tbl_map(function(definition) return definition.command end, postgres.catalogs), {
+		"Relations",
+		"Tables",
+		"Columns",
+		"Indexes",
+		"Constraints",
+		"Sequences",
+		"Functions",
+		"Types",
+		"Policies",
+		"Triggers",
+		"Extensions",
+	})
 end
 
 T["contracts"]["lists databases as paged context choices"] = function()
@@ -235,23 +261,124 @@ T["contracts"]["lists schemas as paged context choices"] = function()
 end
 
 T["contracts"]["lists relations with their schema, name and kind"] = function()
-	stub_output("public\tusers\tr\nanalytics\tevents\tv\n")
+	stub_output("public\tusers\tr\t100\nanalytics\tevents\tv\t101\n")
 	local got
-	postgres.catalogs[1].list({ scope = {} }, function(page) got = page end)
+	postgres.catalogs[1].list({ scope = {}, limit = 2 }, function(page) got = page end)
 	vim.wait(500, function() return got ~= nil end)
 	eq(#got.items, 2)
-	eq(got.items[1], { schema = "public", name = "users", kind = "r" })
-	eq(got.items[1].name, "users")
-	eq(got.items[2].kind, "v")
+	eq(got.items[1].value, {
+		kind = "relation",
+		oid = "100",
+		schema = "public",
+		name = "users",
+		relkind = "r",
+	})
+	eq(got.items[1].display, "public.users  [table]")
+	eq(got.items[2].value.relkind, "v")
 end
 
-T["contracts"]["filters relations by the requested scope"] = function()
-	stub_output("public\tusers\tr\nanalytics\tevents\tv\n")
+T["contracts"]["filters relations by the requested scope on the server"] = function()
+	local sql
+	stub_output("analytics\tevents\tv\t101\n", nil, function(value) sql = value end)
 	local got
-	postgres.catalogs[1].list({ scope = { schema = "analytics" } }, function(page) got = page end)
+	postgres.catalogs[1].list({ scope = { schema = "analytics", all_schemas = false }, limit = 2 }, function(page) got = page end)
 	vim.wait(500, function() return got ~= nil end)
 	eq(#got.items, 1)
-	eq(got.items[1].name, "events")
+	eq(got.items[1].value.name, "events")
+	assert(sql:find("n.nspname = E'analytics'", 1, true) ~= nil)
+end
+
+T["contracts"]["does not add a schema predicate for an all-schema relation listing"] = function()
+	local sql
+	stub_output("", nil, function(value) sql = value end)
+	local done = false
+	postgres.catalogs[1].list({ scope = { schema = "analytics", all_schemas = true }, limit = 2 }, function() done = true end)
+	vim.wait(500, function() return done end)
+	assert(sql:find("n.nspname = E'analytics'", 1, true) == nil)
+end
+
+T["contracts"]["keeps foreign tables in relations but not in compatibility tables"] = function()
+	local relations_sql, tables_sql
+	stub_output("", nil, function(value) relations_sql = value end)
+	local relations_done = false
+	postgres.catalogs[1].list({ scope = {}, limit = 2 }, function() relations_done = true end)
+	vim.wait(500, function() return relations_done end)
+
+	stub_output("", nil, function(value) tables_sql = value end)
+	local tables_done = false
+	postgres.catalogs[2].list({ scope = {}, limit = 2 }, function() tables_done = true end)
+	vim.wait(500, function() return tables_done end)
+
+	assert(relations_sql:find("c.relkind IN ('r', 'v', 'm', 'p', 'f')", 1, true) ~= nil)
+	assert(tables_sql:find("c.relkind IN ('r', 'v', 'm', 'p')", 1, true) ~= nil)
+	assert(tables_sql:find("'f'", 1, true) == nil)
+end
+
+T["contracts"]["builds each catalog query with server filtering, keyset ordering, and limit plus one"] = function()
+	for _, definition in ipairs(postgres.catalogs) do
+		local sql
+		stub_output("", nil, function(value) sql = value end)
+		local done = false
+		definition.list({
+			scope = { schema = "analytics", all_schemas = false },
+			query = "a_b%'\\",
+			limit = 2,
+		}, function() done = true end)
+		vim.wait(500, function() return done end)
+		expect_match(sql, "ORDER BY")
+		expect_match(sql, "LIMIT 3")
+		expect_match(sql, "ILIKE")
+		assert(sql:find("n.nspname = E'analytics'", 1, true) ~= nil)
+	end
+end
+
+T["contracts"]["escapes literal catalog filters without creating SQL fragments"] = function()
+	eq(postgres.quote_literal("a_b%'\\"), "E'a\\\\_b\\\\%''\\\\'")
+	local sql
+	stub_output("", nil, function(value) sql = value end)
+	local done = false
+	postgres.catalogs[1].list({
+		scope = {},
+		query = "a_b%'\\",
+		limit = 2,
+	}, function() done = true end)
+	vim.wait(500, function() return done end)
+	assert(sql:find("ILIKE '%' || E'a\\\\_b\\\\%''\\\\' || '%' ESCAPE E'\\\\'", 1, true) ~= nil)
+end
+
+T["contracts"]["rejects malformed cursors before starting psql"] = function()
+	local started = false
+	stub_output("", nil, function() started = true end)
+	local err
+	postgres.catalogs[1].list({
+		scope = {},
+		limit = 2,
+		cursor = "not json",
+	}, function(_, value) err = value end)
+	expect_match(err, "malformed catalog cursor")
+	eq(started, false)
+end
+
+T["contracts"]["uses the sentinel row only to emit a next cursor"] = function()
+	stub_output("public\taccounts\tr\t100\npublic\torders\tr\t101\npublic\tusers\tr\t102\n")
+	local got
+	postgres.catalogs[1].list({ scope = {}, limit = 2 }, function(page) got = page end)
+	vim.wait(500, function() return got ~= nil end)
+	eq(vim.tbl_map(function(item) return item.value.name end, got.items), { "accounts", "orders" })
+	eq(vim.json.decode(got.next_cursor), { "public", "orders", "101" })
+end
+
+T["contracts"]["adds a keyset predicate from an opaque cursor"] = function()
+	local sql
+	stub_output("", nil, function(value) sql = value end)
+	local done = false
+	postgres.catalogs[1].list({
+		scope = {},
+		limit = 2,
+		cursor = postgres.encode_cursor({ "public", "orders", "101" }),
+	}, function() done = true end)
+	vim.wait(500, function() return done end)
+	assert(sql:find("c.oid > E'101'::oid", 1, true) ~= nil)
 end
 
 T["contracts"]["surfaces the error when the CLI fails"] = function()
@@ -276,7 +403,9 @@ T["contracts"]["previews the selected relation"] = function()
 	local asked
 	dbsh.query = function(sql) asked = sql end
 
-	postgres.catalogs[1].on_select({ schema = "public", name = "users" }, {})
+	postgres.catalogs[1].on_select({
+		value = { schema = "public", name = "users", kind = "relation", oid = "100", relkind = "r" },
+	}, {})
 
 	dbsh.query = original
 	eq(asked, 'SELECT * FROM "public"."users" LIMIT 10;')

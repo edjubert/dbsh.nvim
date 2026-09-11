@@ -50,6 +50,7 @@ local function open(t, opts)
 		}),
 		sorter = t.conf.generic_sorter({}),
 		attach_mappings = opts.attach_mappings,
+		on_input_filter_cb = opts.on_input_filter_cb,
 	}):find()
 end
 
@@ -261,7 +262,8 @@ local function item_label(item)
 	return item.name or item.key or item.kind or vim.inspect(item)
 end
 
-local function choose(title, items, callback)
+local function choose(title, items, callback, options)
+	options = options or {}
 	local t = M._telescope()
 	if t == nil then
 		vim.ui.select(items, {
@@ -270,6 +272,7 @@ local function choose(title, items, callback)
 		}, callback)
 		return
 	end
+	local close_picker
 	open(t, {
 		title = title,
 		results = items,
@@ -277,10 +280,30 @@ local function choose(title, items, callback)
 			local label = item_label(item)
 			return { value = item, display = label, ordinal = label }
 		end,
+		on_input_filter_cb = options.on_input_filter_cb and function(prompt)
+			options.on_input_filter_cb(prompt, function()
+				if close_picker ~= nil then
+					close_picker()
+				end
+			end)
+		end or nil,
 		attach_mappings = function(bufnr, map)
+			close_picker = function() t.actions.close(bufnr) end
 			bind_enter(t, bufnr, map, function(entry)
 				callback(entry and entry.value)
 			end)
+			if options.on_inspect ~= nil then
+				local inspect = function()
+					local entry = t.state.get_selected_entry()
+					if entry == nil or entry.value == nil then
+						return
+					end
+					t.actions.close(bufnr)
+					options.on_inspect(entry.value)
+				end
+				map("i", "<C-i>", inspect)
+				map("n", "<C-i>", inspect)
+			end
 			return true
 		end,
 	})
@@ -398,7 +421,21 @@ local function choose_scope(snapshot, callback)
 end
 
 function M._debounce(callback)
-	callback()
+	if M._debounce_timer ~= nil then
+		M._debounce_timer:stop()
+		M._debounce_timer:close()
+	end
+	local timer = (vim.uv or vim.loop).new_timer()
+	M._debounce_timer = timer
+	timer:start(100, 0, vim.schedule_wrap(function()
+		if M._debounce_timer ~= timer then
+			return
+		end
+		M._debounce_timer = nil
+		timer:stop()
+		timer:close()
+		callback()
+	end))
 end
 
 function M.catalog(key, options)
@@ -408,41 +445,79 @@ function M.catalog(key, options)
 		return notify_error(err)
 	end
 	local definition = contract_for(backend, "catalogs", key)
+		or contract_for(backend, "inspectors", key)
 	if definition == nil then
 		return notify_error(string.format("%s is not available for %s", key, backend.name))
 	end
 
 	local function open_scope(scope)
-		local function load(cursor)
-			M._debounce(function()
-				catalog.request(snapshot, definition, {
-					scope = scope,
-					query = options.query,
-					cursor = cursor,
-				}, function(page, request_err)
-					if request_err ~= nil then
-						return notify_error(request_err)
+		local active_query = options.query or ""
+		local function load(cursor, query)
+			catalog.request(snapshot, definition, {
+				scope = scope,
+				query = query,
+				cursor = cursor,
+				relation = options.relation,
+			}, function(page, request_err)
+				if request_err ~= nil then
+					return notify_error(request_err)
+				end
+				local items = vim.deepcopy(page.items)
+				local more = catalog.load_more_entry(page)
+				if more ~= nil then
+					table.insert(items, more)
+				end
+				choose("dbsh " .. definition.title:lower(), items, function(item)
+					if item == nil then
+						return
 					end
-					local items = vim.deepcopy(page.items)
-					local more = catalog.load_more_entry(page)
-					if more ~= nil then
-						table.insert(items, more)
+					if item.kind == "more" then
+						return load(item.cursor, active_query)
 					end
-					choose("dbsh " .. definition.title:lower(), items, function(item)
-						if item == nil then
+					if definition.on_select ~= nil then
+						definition.on_select(item, snapshot)
+					end
+				end, {
+					on_inspect = definition.inspect and function(item)
+						if item.kind == "more" then
 							return
 						end
-						if item.kind == "more" then
-							return load(item.cursor)
+						local actions = definition.inspect(item, snapshot) or {}
+						choose("dbsh relation inspector", actions, function(action)
+							if action == nil then
+								return
+							end
+							if action.action ~= nil then
+								action.action(item, snapshot)
+								return
+							end
+							local child = action.catalog or action.inspector
+							if child ~= nil then
+								M.catalog(child, {
+									scope = scope,
+									relation = action.relation,
+								})
+							end
+						end)
+					end or nil,
+					on_input_filter_cb = function(query_value, close)
+						if query_value == active_query then
+							return
 						end
-						if definition.on_select ~= nil then
-							definition.on_select(item, snapshot)
-						end
-					end)
-				end)
+						active_query = query_value
+						local requested_query = query_value
+						M._debounce(function()
+							if requested_query ~= active_query then
+								return
+							end
+							close()
+							load(nil, requested_query)
+						end)
+					end,
+				})
 			end)
 		end
-		load(options.cursor)
+		load(options.cursor, active_query)
 	end
 
 	if options.scope ~= nil then
