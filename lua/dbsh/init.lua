@@ -9,6 +9,7 @@ local definitions = require("dbsh.definitions")
 local csv = require("dbsh.csv")
 local export = require("dbsh.export")
 local resolve = require("dbsh.resolve")
+local safety = require("dbsh.safety")
 local lsp = require("dbsh.lsp")
 
 local M = {}
@@ -30,14 +31,7 @@ function M.last_query(bufnr_or_snapshot)
 	return last_queries[snapshot.id]
 end
 
-function M.query(sql)
-	sql = vim.trim(sql or "")
-	if sql == "" then
-		vim.notify("dbsh.nvim: query is empty", vim.log.levels.WARN)
-		return
-	end
-
-	local snapshot = context.snapshot(0)
+local function run_query(sql, snapshot)
 	last_queries[snapshot.id] = sql
 	resolve.preamble(sql, snapshot, function(preamble)
 		if preamble == nil then
@@ -57,6 +51,28 @@ function M.query(sql)
 			end
 		end)
 	end)
+end
+
+function M.query(sql)
+	sql = vim.trim(sql or "")
+	if sql == "" then
+		vim.notify("dbsh.nvim: query is empty", vim.log.levels.WARN)
+		return
+	end
+
+	local snapshot = context.snapshot(0)
+	local classification = safety.classify(sql)
+	if config.options().safety.mode == "confirm" and classification.action == "confirm" then
+		vim.ui.select({ "Run", "Cancel" }, {
+			prompt = string.format("dbsh.nvim: confirm %s SQL: ", classification.reason),
+		}, function(choice)
+			if choice == "Run" then
+				run_query(sql, snapshot)
+			end
+		end)
+		return
+	end
+	run_query(sql, snapshot)
 end
 
 function M.query_current_line()

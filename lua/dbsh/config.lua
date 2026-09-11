@@ -16,6 +16,7 @@ local defaults = {
 	export_dir = vim.fs.joinpath(vim.fn.stdpath("data"), "dbsh", "exports"),
 	results_split = "horizontal",
 	variable_patterns = {},
+	safety = { mode = "confirm" },
 	lsp = { enabled = false },
 }
 
@@ -33,6 +34,14 @@ function M.setup(opts)
 			vim.log.levels.WARN
 		)
 		M.state.opts.catalog_page_size = defaults.catalog_page_size
+	end
+	if type(M.state.opts.safety) ~= "table"
+		or (M.state.opts.safety.mode ~= "confirm" and M.state.opts.safety.mode ~= "off") then
+		vim.notify(
+			"dbsh.nvim: safety.mode must be 'confirm' or 'off'; using 'confirm'",
+			vim.log.levels.WARN
+		)
+		M.state.opts.safety = vim.deepcopy(defaults.safety)
 	end
 end
 

@@ -16,9 +16,15 @@ Framing: full Neovim window, no terminal chrome, no tab bar clutter.
 ```lua
 require("dbsh").setup({
 	connections = {
-		local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
+		analytics = {
+			type = "postgres",
+			host = "<host>",
+			port = 5432,
+			database = "<database>",
+			username = "<username>",
+		},
 	},
-	default = "local_db",
+	default = "analytics",
 })
 ```
 
@@ -43,13 +49,13 @@ changed.
 |---|---|---|
 | Execution | `vim.fn.systemlist`, editor frozen until the query returns | `vim.system`, asynchronous and cancellable |
 | Authentication | password or hash stored in your Neovim config | `~/.pgpass`, resolved by `psql` itself |
-| Switching database | one Lua file per connection, hand-written | Telescope picker over declared connections |
-| Schema browsing | none | connections, databases, schemas, tables |
-| Ad-hoc queries | scratch buffer, lost on exit | a real `.sql` file per connection |
+| Switching database | one Lua file per connection, hand-written | context scoped to the active buffer |
+| Schema browsing | none | paged contexts and PostgreSQL object catalogs |
+| Ad-hoc queries | scratch buffer, lost on exit | named scratchpads with independent metadata |
 | Getting data out | one cell at a time | CSV to file, or CSV from a visual selection |
 | Result buffer | soft-wrapped, editable | horizontal scroll, read-only |
 | Lua namespace | `lua/psql.lua`, `lua/util/`, `lua/hash/` | everything under `lua/dbsh/` |
-| Tests | none | 95 cases on `mini.test`, `make test` |
+| Tests | none | `mini.test`, run with `make test` |
 
 ### It never blocks
 
@@ -78,8 +84,9 @@ Framing: the Telescope window, with enough of the underlying SQL buffer visible
 -->
 ![Table picker](docs/media/picker-tables.png)
 
-Four pickers, and a drill-down from schemas into their tables. Selecting a table
-previews it immediately.
+Contexts, paged catalogues and relation inspection all use the same picker
+surface. Selecting a relation previews rows; structural objects open a
+read-only definition buffer.
 
 ---
 
@@ -106,10 +113,15 @@ previews it immediately.
 	config = function()
 		require("dbsh").setup({
 			connections = {
-				local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
-				staging = { host = "db.example.com", port = 5432, database = "app", username = "readonly" },
+				analytics = {
+					type = "postgres",
+					host = "<host>",
+					port = 5432,
+					database = "<database>",
+					username = "<username>",
+				},
 			},
-			default = "local_db",
+			default = "analytics",
 		})
 	end,
 }
@@ -152,16 +164,24 @@ If a password prompt appears, `~/.pgpass` is being ignored — see
 ```lua
 require("dbsh").setup({
 	connections = {
-		local_db = { type = "postgres", host = "localhost", port = 5432, database = "postgres", username = "dev" },
+		analytics = {
+			type = "postgres",
+			host = "<host>",
+			port = 5432,
+			database = "<database>",
+			username = "<username>",
+		},
 	},
-	default = "local_db",
+	default = "analytics",
 	connect_timeout = 5,
 	query_timeout = 30000,
 	preview_limit = 10,
+	catalog_page_size = 200,
 	csv_delimiter = ",",
 	export_dir = vim.fs.joinpath(vim.fn.stdpath("data"), "dbsh", "exports"),
 	results_split = "horizontal",
 	variable_patterns = {}, -- e.g. { ":(raw_data)" }, see SQL variables below
+	safety = { mode = "confirm" }, -- "confirm" or "off"
 	lsp = { enabled = false }, -- steer postgres-language-server, see below
 })
 ```
@@ -173,10 +193,12 @@ require("dbsh").setup({
 | `connect_timeout` | `5` | `PGCONNECT_TIMEOUT`, in seconds. |
 | `query_timeout` | `30000` | Kills a runaway query, in milliseconds. |
 | `preview_limit` | `10` | `LIMIT` used when previewing a table from the picker. |
+| `catalog_page_size` | `200` | Number of catalog objects fetched per page. |
 | `csv_delimiter` | `","` | Column separator, for both CSV export and CSV yank. |
 | `export_dir` | `<stdpath("data")>/dbsh/exports` | Where `:DbExportCSV` suggests writing. |
 | `results_split` | `"horizontal"` | `"horizontal"`, `"vertical"` or `"float"`: which window opens `__DBSH__` in. Only applies the first time the window is created; combine with `vim.opt.splitright = true` for a right-hand split. `"float"` is styled after your telescope config, when installed. |
 | `variable_patterns` | `{}` | Lua patterns (one capture each) naming SQL variables to prompt for. See [SQL variables](#sql-variables). |
+| `safety` | `{ mode = "confirm" }` | Confirms mutating or ambiguous SQL. Use `{ mode = "off" }` to disable the ergonomic guardrail. |
 | `lsp` | `{ enabled = false }` | Point an already-running [postgres-language-server](#language-server) at the connection you pick. Off by default: it talks to a client dbsh does not own. |
 
 There is deliberately **no** `password` field.
@@ -188,8 +210,7 @@ prompts and never leaks a password into the process list.
 
 ```
 # ~/.pgpass — hostname:port:database:username:password
-db.example.com:5432:*:readonly:secret
-localhost:5432:*:dev:secret
+<host>:<port>:<database>:<username>:<password>
 ```
 
 The file **must** be `chmod 600`:
@@ -270,25 +291,42 @@ connection succeeds.
 | Command | Description |
 |---|---|
 | `:DbConnections` | pick a connection |
-| `:DbTemp` | open the scratchpad of the current connection |
+| `:DbTemp` | open the named scratchpad picker |
+| `:DbObjects` | choose an object catalog |
+| `:DbDefinitions` | choose a definition buffer for the active context |
+| `:DbToggleDefinition` | show or hide the current/last definition |
+| `:DbRefreshDefinition` | re-fetch the current definition using its captured context |
+| `:DbCloseDefinitions` | close visible definition windows for the active context |
 | `:DbToggleResults` | toggle the result window closed or open, keeping its content |
 | `:DbExportCSV` | export a query result to a CSV file — accepts a range |
 | `:DbCancel` | cancel the running query |
 | `:DbInfo` | show the current connection and database |
 
-The catalog commands are declared by the backend of the current connection, not
-by the plugin, and are redeclared whenever you switch connection. A postgres
-connection gives you:
+Catalog commands are declared from the union of installed backend contracts, then
+dispatched against the backend of the active buffer. A command that is not
+available for that buffer explains why instead of changing another buffer's
+context. PostgreSQL provides:
 
 | Command | Description |
 |---|---|
 | `:DbDatabases` | pick a database on the current server |
-| `:DbSchemas` | pick a schema, then drill into its tables |
-| `:DbTables` | pick any table, as a flat `schema.table` list |
+| `:DbSchemas` | set the active schema context |
+| `:DbRelations` | browse tables, views, materialized/partitioned and foreign tables |
+| `:DbTables` | compatibility relation browser without foreign tables |
+| `:DbColumns`, `:DbIndexes`, `:DbConstraints`, `:DbSequences` | browse structural objects |
+| `:DbFunctions`, `:DbTypes`, `:DbPolicies`, `:DbTriggers`, `:DbExtensions` | browse remaining PostgreSQL object kinds |
 
-A backend with a different hierarchy declares different commands, and the ones
-that do not apply simply do not exist — completion only offers what makes sense
-for the connection you are on.
+Catalog searches are literal server-side filters, not arbitrary SQL. They use
+deterministic keyset pagination; choose **Load more** to fetch the next page.
+
+### Compatibility note
+
+`:DbTables` remains available for PostgreSQL users migrating from older dbsh or
+psql.nvim configurations. It keeps the historical table/view/materialized-view/
+partitioned-table coverage. Prefer `:DbRelations` for the canonical relation
+browser, which also includes foreign tables. Backend authors should use the
+separate `contexts` and `catalogs` contracts; the former `backend.levels`
+hierarchy is no longer part of the plugin contract.
 
 ## Lua API
 
@@ -346,6 +384,29 @@ Three ways to send SQL, none of which need a precise selection:
 While a query runs, the result buffer shows a `# Running...` placeholder, and
 `:DbCancel` kills the process.
 
+### Query safety
+
+By default dbsh asks before SQL that mutates data/schema, changes privileges, is
+ambiguous, or contains multiple top-level statements. Read-only `SELECT`, `WITH
+… SELECT`, `SHOW`, `DESCRIBE`, `DESC`, and `EXPLAIN` run immediately.
+
+The prompt describes only the classifier reason; it never displays resolved
+variable values. Choosing **Cancel** stops before dbsh asks for SQL variables or
+starts a subprocess. This is an ergonomic guardrail, not authorization:
+PostgreSQL permissions remain authoritative. Set `safety = { mode = "off" }` if
+you do not want confirmations.
+
+Manually typed `SET ROLE`, `USE`, or similar SQL affects only that invocation.
+dbsh never infers a persistent context change from arbitrary SQL.
+
+### Contexts and sessions
+
+Connection and database/schema selections belong to the active buffer. Two SQL
+buffers can therefore use different connections and schemas at the same time;
+their queries, result buffers, process slots, catalog pages, and definitions do
+not overwrite each other. `:DbGlobalConnection` changes only the fallback used
+by buffers that have not been explicitly bound.
+
 ## Results buffer
 
 <!--
@@ -388,20 +449,31 @@ Shows: the drill-down. Frame 1, :DbSchemas with a schema highlighted.
 - **`:DbConnections`** — switch between the connections you declared.
 - **`:DbDatabases`** — every database on the current server. Selecting one keeps
   the same host, port and user, and swaps only the database.
-- **`:DbSchemas`** — pick a schema, then land in its tables. `<BS>` goes back to
-  the schema list; it is bound in **normal mode only**, so backspace still edits
-  the prompt.
-- **`:DbTables`** — every table, as a flat `schema.table` list, annotated with
-  its kind: `table`, `view`, `matview`, `partitioned`.
+- **`:DbSchemas`** — pick the schema context for the active buffer.
+- **`:DbRelations`** / **`:DbTables`** — browse relations with a schema scope or
+  all schemas. `DbTables` keeps the compatibility object set.
+- **Structural catalogs** — columns, indexes, constraints, sequences, routines,
+  types, policies, triggers, and extensions are direct commands as listed above.
 
 Selecting a table runs `SELECT * FROM "schema"."table" LIMIT 10;`, with the limit
 taken from `preview_limit`. Identifiers are quoted, so mixed-case names and
 reserved words survive.
 
-Catalog navigation is generic: the backend declares an ordered list of levels,
-and the plugin renders each of them with the same picker. `<BS>` walks back up
-that list. Introspection runs on its own execution slot, which means opening a
-picker never cancels a query you are waiting on.
+Press `<C-i>` on a relation to open its inspector: Columns, Indexes,
+Constraints, Triggers, Policies, Dependencies, and Definition. Structural
+objects open a read-only DDL buffer. Introspection and DDL execution use
+independent process slots, so neither cancels a user query.
+
+### Definition buffers
+
+There is one read-only DDL buffer per object identity and effective public
+context. Reopening the same object focuses it; opening a different object while
+reading a definition uses a split, keeping the previous DDL visible.
+
+Definition buffers retain the context captured at opening. Consequently,
+`:DbRefreshDefinition` does not accidentally use a connection selected later in
+another buffer. `:DbDefinitions` lists them for the active context and
+`:DbCloseDefinitions` hides only visible windows; hidden buffers remain reusable.
 
 ## Backends
 
@@ -410,7 +482,13 @@ property of the connection:
 
 ```lua
 connections = {
-	local_db = { type = "postgres", host = "localhost", port = 5432, database = "postgres", username = "dev" },
+	analytics = {
+		type = "postgres",
+		host = "<host>",
+		port = 5432,
+		database = "<database>",
+		username = "<username>",
+	},
 }
 ```
 
@@ -418,9 +496,10 @@ connections = {
 backend is a small table under `lua/dbsh/backends/`: it says how to build the
 CLI invocation, what preamble to write, how to parse raw output, how to declare
 a query variable, how to export CSV, and which navigation levels its catalog
-has. Everything else — the result buffer, the CSV yank, the scratchpad, the
-variable prompts, the export file handling — is shared and knows nothing about
-any particular database.
+has. Context selectors live in `backend.contexts`; paged object browsers live in
+`backend.catalogs`. Everything else — result and definition buffers, the CSV
+yank, scratchpads, variable prompts, and export file handling — is shared and
+knows nothing about any particular database.
 
 ## Scratchpad
 
@@ -435,12 +514,13 @@ Framing: include the statusline; the path is the point of the shot.
 -->
 ![Scratchpad](docs/media/scratchpad.png)
 
-`:DbTemp` opens `<stdpath("data")>/dbsh/<connection>.sql` — a real file on disk,
-not a throwaway buffer. Your SQL LSP, your formatter and persistent undo all work
-normally, and the file survives restarts.
+`:DbTemp` opens a picker of named scratchpads. Each scratchpad is a real `.sql`
+file with persistent metadata: backend, optional connection, effective context
+levels, and an optional project root. Your SQL LSP, formatter, and persistent
+undo work normally, and scratchpads survive restarts.
 
-Each connection gets its own, so your working queries follow the database you are
-working on.
+Scratchpads do not share an in-memory global context. Opening two of them keeps
+their sessions independent, just like ordinary SQL buffers.
 
 ## SQL variables
 
@@ -511,8 +591,8 @@ SCREENSHOT docs/media/export-prompt.png
 Shows: the destination prompt and its generated suggestion.
 Setup: run :DbExportCSV from the __DBSH__ buffer. Capture while the prompt is
   open, pre-filled with a path of the form
-  ~/.local/share/nvim/dbsh/exports/20260831_local_db.csv so the date and the
-  connection name are both legible.
+  <export_dir>/<YYYYMMDD>_<connection>.csv so the date and connection name are
+  both legible.
 Framing: the command line area plus enough of the result buffer above to show
   which query is being exported.
 -->
@@ -634,14 +714,15 @@ The modules are small and single-purpose, which is what makes them testable:
 
 | Module | Responsibility |
 |---|---|
-| `config.lua` | declared connections, current selection, generation counter |
-| `exec.lua` | asynchronous `psql` invocation, execution slots, cancellation |
-| `results.lua` | the `__DBSH__` buffer |
-| `introspect.lua` | catalog queries and their parsing |
-| `scratch.lua` | per-connection scratchpad file |
+| `config.lua` / `context.lua` | static options and buffer-scoped runtime contexts |
+| `exec.lua` | asynchronous SQL/argv invocation, session slots, cancellation |
+| `results.lua` / `definitions.lua` | read-only result and DDL buffers |
+| `catalog.lua` / `backends/*.lua` | generic paged contract and backend catalog queries |
+| `scratch.lua` | named scratchpads and their metadata |
+| `safety.lua` | pure conservative SQL confirmation classifier |
 | `csv.lua` | table parsing and CSV serialization, pure functions |
 | `export.lua` | destination paths and the `COPY` statement |
-| `telescope/pickers.lua` | the four pickers |
+| `telescope/pickers.lua` | connection, scratchpad, catalog, and definition pickers |
 | `init.lua` | public API and user commands |
 
 ## Credits
