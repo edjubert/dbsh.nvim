@@ -26,6 +26,7 @@ T["applies default options"] = function()
 	eq(config.options().query_timeout, 30000)
 	eq(config.options().preview_limit, 10)
 	eq(config.options().catalog_page_size, 200)
+	eq(config.options().credentials.cache_ttl_ms, 900000)
 	eq(config.options().safety.mode, "confirm")
 end
 
@@ -66,6 +67,23 @@ end
 T["falls back from a fractional catalog page size"] = function()
 	config.setup({ connections = {}, catalog_page_size = 2.5 })
 	eq(config.options().catalog_page_size, 200)
+end
+
+T["accepts a positive credential cache TTL"] = function()
+	config.setup({ connections = {}, credentials = { cache_ttl_ms = 25 } })
+	eq(config.options().credentials.cache_ttl_ms, 25)
+end
+
+T["falls back from an invalid credential cache TTL with a clear warning"] = function()
+	local original_notify = vim.notify
+	local notified
+	vim.notify = function(message) notified = message end
+
+	config.setup({ connections = {}, credentials = { cache_ttl_ms = math.huge } })
+
+	vim.notify = original_notify
+	eq(config.options().credentials.cache_ttl_ms, 900000)
+	expect_match(notified, "credentials.cache_ttl_ms")
 end
 
 T["lists connection names sorted"] = function()
