@@ -12,6 +12,7 @@ local defaults = {
 	query_timeout = 30000,
 	preview_limit = 10,
 	catalog_page_size = 200,
+	credentials = { cache_ttl_ms = 900000 },
 	csv_delimiter = ",",
 	export_dir = vim.fs.joinpath(vim.fn.stdpath("data"), "dbsh", "exports"),
 	results_split = "horizontal",
@@ -48,6 +49,13 @@ local function valid_command(command)
 		end
 	end
 	return true
+end
+
+local function valid_positive_finite_integer(value)
+	return type(value) == "number"
+		and value > 0
+		and value < math.huge
+		and value == math.floor(value)
 end
 
 local function normalize_lsp(raw_lsp)
@@ -104,11 +112,14 @@ function M.setup(opts)
 	end
 	M.state.opts = vim.tbl_deep_extend("force", vim.deepcopy(defaults), input)
 	normalize_lsp(raw_lsp)
-	if type(M.state.opts.catalog_page_size) ~= "number"
-		or M.state.opts.catalog_page_size <= 0
-		or M.state.opts.catalog_page_size ~= math.floor(M.state.opts.catalog_page_size) then
+	if not valid_positive_finite_integer(M.state.opts.catalog_page_size) then
 		warn("catalog_page_size must be a positive integer; using 200")
 		M.state.opts.catalog_page_size = defaults.catalog_page_size
+	end
+	if type(M.state.opts.credentials) ~= "table"
+		or not valid_positive_finite_integer(M.state.opts.credentials.cache_ttl_ms) then
+		warn("credentials.cache_ttl_ms must be a positive integer; using 900000")
+		M.state.opts.credentials = vim.deepcopy(defaults.credentials)
 	end
 	if type(M.state.opts.safety) ~= "table"
 		or (M.state.opts.safety.mode ~= "confirm" and M.state.opts.safety.mode ~= "off") then
