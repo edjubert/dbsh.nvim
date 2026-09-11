@@ -4,6 +4,7 @@ local eq, expect_match = helpers.eq, helpers.expect_match
 local config = require("dbsh.config")
 local context = require("dbsh.context")
 local pickers = require("dbsh.telescope.pickers")
+local scratch = require("dbsh.scratch")
 
 local T = MiniTest.new_set()
 
@@ -273,6 +274,152 @@ T["hands the selected item to the leaf handler"] = function()
 
 	dbsh.query = original_query
 	expect_match(asked, "public")
+end
+
+T["opens the selected scratchpad from the catalog picker"] = function()
+	connect()
+	local captured = {}
+	local fake = {
+		pickers = {
+			new = function(_, opts)
+				return {
+					find = function()
+						assert(opts.attach_mappings(1, function(mode, key, handler)
+							captured.maps = captured.maps or {}
+							captured.maps[mode .. "|" .. key] = handler
+						end))
+					end,
+				}
+			end,
+		},
+		finders = {
+			new_table = function(opts)
+				captured.results = opts.results
+				return {}
+			end,
+		},
+		conf = { generic_sorter = function(_) return {} end },
+		actions = { close = function() end },
+		state = {
+			get_selected_entry = function()
+				return { value = captured.results[2] }
+			end,
+		},
+	}
+	local opened
+	local original_telescope, original_list, original_open = pickers._telescope, scratch.list, scratch.open
+	pickers._telescope = function() return fake end
+	scratch.list = function()
+		return {
+			{
+				id = "monthly",
+				metadata = {
+					name = "Monthly",
+					backend = "postgres",
+					connection_name = "local_db",
+					levels = { database = "postgres" },
+				},
+			},
+		}
+	end
+	scratch.open = function(id) opened = id end
+
+	pickers.scratchpads()
+	captured.maps["i|<CR>"]()
+
+	scratch.open = original_open
+	scratch.list = original_list
+	pickers._telescope = original_telescope
+	eq(captured.results[1].kind, "new")
+	eq(opened, "monthly")
+end
+
+T["creates a scratchpad only after the mandatory project-root prompt"] = function()
+	connect()
+	local original_select, original_input = vim.ui.select, vim.ui.input
+	local original_create, original_open = scratch.create, scratch.open
+	local prompts, created, opened = {}, nil, nil
+	local choices = {
+		"local_db",
+		{ kind = "current" },
+	}
+	vim.ui.select = function(_, opts, callback)
+		table.insert(prompts, opts.prompt)
+		callback(table.remove(choices, 1))
+	end
+	vim.ui.input = function(opts, callback)
+		eq(opts.prompt, "dbsh scratchpad name: ")
+		callback("Reconciliation")
+	end
+	scratch.create = function(value)
+		created = value
+		return vim.tbl_extend("force", { id = "created" }, value)
+	end
+	scratch.open = function(id) opened = id end
+
+	pickers.new_scratchpad()
+
+	scratch.open = original_open
+	scratch.create = original_create
+	vim.ui.input = original_input
+	vim.ui.select = original_select
+	eq(prompts, { "dbsh scratchpad connection: ", "dbsh scratchpad project root: " })
+	eq(created.name, "Reconciliation")
+	eq(created.connection_name, "local_db")
+	eq(created.backend, "postgres")
+	eq(created.levels, { database = "postgres" })
+	eq(created.project_root, vim.fn.getcwd())
+	eq(opened, "created")
+end
+
+T["stops scratchpad creation when any prompt is cancelled"] = function()
+	connect()
+	local original_select, original_input = vim.ui.select, vim.ui.input
+	local original_create = scratch.create
+	local scenarios = {
+		{ selects = { nil } },
+		{ selects = { "local_db", nil } },
+		{ selects = { "local_db", { kind = "choose" } }, inputs = { nil } },
+		{ selects = { "local_db", { kind = "standalone" } }, inputs = { nil } },
+	}
+
+	for _, scenario in ipairs(scenarios) do
+		local selects = vim.deepcopy(scenario.selects)
+		local inputs = vim.deepcopy(scenario.inputs or {})
+		local creates = 0
+		vim.ui.select = function(_, _, callback) callback(table.remove(selects, 1)) end
+		vim.ui.input = function(_, callback) callback(table.remove(inputs, 1)) end
+		scratch.create = function()
+			creates = creates + 1
+		end
+
+		pickers.new_scratchpad()
+		eq(creates, 0)
+	end
+
+	scratch.create = original_create
+	vim.ui.input = original_input
+	vim.ui.select = original_select
+end
+
+T["falls back to vim.ui.select when Telescope is unavailable for scratchpads"] = function()
+	local original_telescope, original_select = pickers._telescope, vim.ui.select
+	local original_list = scratch.list
+	local asked
+	pickers._telescope = function() return nil end
+	scratch.list = function() return {} end
+	vim.ui.select = function(_, opts, callback)
+		asked = opts
+		callback(nil)
+	end
+
+	local ok = pcall(pickers.scratchpads)
+
+	vim.ui.select = original_select
+	scratch.list = original_list
+	pickers._telescope = original_telescope
+	eq(ok, true)
+	eq(asked.prompt, "dbsh scratchpads: ")
 end
 
 return T

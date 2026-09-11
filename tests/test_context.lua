@@ -143,4 +143,62 @@ T["emits redacted public data for context changes and the legacy event once"] = 
 	eq(events[1].current.connection_name, "staging")
 end
 
+T["persists scratchpad public context after successful mutations"] = function()
+	local bufnr = vim.api.nvim_create_buf(false, true)
+	local saved = {}
+	local connection = assert(config.connection("local_db"))
+	assert(context.attach(bufnr, {
+		id = "scratchpad:monthly",
+		scratchpad_id = "monthly",
+		kind = "scratchpad",
+		connection_name = "local_db",
+		connection = connection,
+		backend_name = "postgres",
+		levels = { database = "postgres" },
+		project_root = "/work/monthly",
+		on_change = function(value) table.insert(saved, value) end,
+	}))
+
+	assert(context.set_level(bufnr, "schema", "reporting", "catalog"))
+	assert(context.bind(bufnr, "staging", "connections"))
+
+	eq(#saved, 2)
+	eq(saved[1], {
+		id = "scratchpad:monthly",
+		kind = "scratchpad",
+		bufnr = bufnr,
+		scratchpad_id = "monthly",
+		connection_name = "local_db",
+		backend = "postgres",
+		levels = { database = "postgres", schema = "reporting" },
+		project_root = "/work/monthly",
+		generation = 1,
+		database = "postgres",
+		schema = "reporting",
+	})
+	eq(saved[2].id, "scratchpad:monthly")
+	eq(saved[2].connection_name, "staging")
+	eq(saved[2].project_root, "/work/monthly")
+	eq(saved[2].connection, nil)
+
+	vim.api.nvim_buf_delete(bufnr, { force = true })
+end
+
+T["refuses to forget a persistent scratchpad context"] = function()
+	local bufnr = vim.api.nvim_create_buf(false, true)
+	assert(context.attach(bufnr, {
+		id = "scratchpad:monthly",
+		scratchpad_id = "monthly",
+		kind = "scratchpad",
+		connection_name = "local_db",
+		connection = assert(config.connection("local_db")),
+	}))
+
+	local current, err = context.forget(bufnr, "forget")
+	eq(current, nil)
+	expect_match(err, "persistent")
+
+	vim.api.nvim_buf_delete(bufnr, { force = true })
+end
+
 return T

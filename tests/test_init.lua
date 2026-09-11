@@ -62,6 +62,18 @@ T["declares every backend-agnostic command"] = function()
 	end
 end
 
+T["opens the scratchpad catalog from DbTemp"] = function()
+	local pickers = require("dbsh.telescope.pickers")
+	local original = pickers.scratchpads
+	local calls = 0
+	pickers.scratchpads = function() calls = calls + 1 end
+
+	vim.cmd("DbTemp")
+
+	pickers.scratchpads = original
+	eq(calls, 1)
+end
+
 T["generates one command per level the backend declares"] = function()
 	for _, name in ipairs({ "DbDatabases", "DbSchemas", "DbTables" }) do
 		eq(vim.fn.exists(":" .. name), 2)
