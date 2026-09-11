@@ -26,6 +26,7 @@ T["applies default options"] = function()
 	eq(config.options().query_timeout, 30000)
 	eq(config.options().preview_limit, 10)
 	eq(config.options().catalog_page_size, 200)
+	eq(config.options().credentials.cache_ttl_ms, 900000)
 	eq(config.options().safety.mode, "confirm")
 end
 
@@ -66,6 +67,23 @@ end
 T["falls back from a fractional catalog page size"] = function()
 	config.setup({ connections = {}, catalog_page_size = 2.5 })
 	eq(config.options().catalog_page_size, 200)
+end
+
+T["accepts a positive credential cache TTL"] = function()
+	config.setup({ connections = {}, credentials = { cache_ttl_ms = 25 } })
+	eq(config.options().credentials.cache_ttl_ms, 25)
+end
+
+T["falls back from an invalid credential cache TTL with a clear warning"] = function()
+	local original_notify = vim.notify
+	local notified
+	vim.notify = function(message) notified = message end
+
+	config.setup({ connections = {}, credentials = { cache_ttl_ms = math.huge } })
+
+	vim.notify = original_notify
+	eq(config.options().credentials.cache_ttl_ms, 900000)
+	expect_match(notified, "credentials.cache_ttl_ms")
 end
 
 T["lists connection names sorted"] = function()
@@ -112,6 +130,31 @@ T["rejects a connection whose type has no backend"] = function()
 	local backend, err = config.backend_for(assert(config.connection("weird")))
 	eq(backend, nil)
 	expect_match(err, "unknown connection type")
+end
+
+T["validates Snowflake profiles without exposing profile values"] = function()
+	config.setup({
+		connections = {
+			snow = {
+				type = "snowflake",
+				host = "account.example.test",
+				port = 443,
+				username = "analyst",
+				authenticator = "https://sso.example.test",
+				role = "ANALYST",
+				warehouse = "COMPUTE",
+				database = "ANALYTICS",
+				password_command = { "password-command", "--profile", "analytics" },
+				password = "fake-password",
+			},
+		},
+		default = "snow",
+	})
+
+	local connection, err = config.connection("snow")
+	eq(connection, nil)
+	expect_match(err, "must not provide a password")
+	eq(err:find("fake-password", 1, true), nil)
 end
 
 T["reports no connection when resolving a backend"] = function()

@@ -3,10 +3,16 @@ local eq, expect_match = helpers.eq, helpers.expect_match
 
 local config = require("dbsh.config")
 local context = require("dbsh.context")
+local credentials = require("dbsh.credentials")
 local exec = require("dbsh.exec")
 local postgres = require("dbsh.backends.postgres")
 
 local original_runner
+local original_prepare
+local original_postgres_argv
+local original_postgres_env
+local original_is_authentication_error
+local original_invalidate
 
 local T = MiniTest.new_set({
 	hooks = {
@@ -20,10 +26,22 @@ local T = MiniTest.new_set({
 			})
 			context.setup()
 			original_runner = exec.runner
+			original_prepare = postgres.prepare
+			original_postgres_argv = postgres.argv
+			original_postgres_env = postgres.env
+			original_is_authentication_error = postgres.is_authentication_error
+			original_invalidate = credentials.invalidate
+			credentials.clear()
 		end,
 		post_case = function()
 			exec.runner = original_runner
 			exec.slots = {}
+			postgres.prepare = original_prepare
+			postgres.argv = original_postgres_argv
+			postgres.env = original_postgres_env
+			postgres.is_authentication_error = original_is_authentication_error
+			credentials.invalidate = original_invalidate
+			credentials.clear()
 		end,
 	},
 })
@@ -47,6 +65,203 @@ T["passes PGCONNECT_TIMEOUT and never PGPASSWORD"] = function()
 
 	eq(captured_opts.env.PGCONNECT_TIMEOUT, "5")
 	eq(captured_opts.env.PGPASSWORD, nil)
+end
+
+T["executes normally when the backend has no prepare hook"] = function()
+	postgres.prepare = nil
+	local captured_runtime
+	postgres.argv = function(connection, path, mode, runtime)
+		captured_runtime = runtime
+		return original_postgres_argv(connection, path, mode, runtime)
+	end
+	exec.runner = function(_, _, _)
+		return { kill = function() end }
+	end
+
+	exec.run("SELECT 1;", {}, function() end)
+
+	eq(captured_runtime, {})
+end
+
+T["waits for a successful asynchronous backend preparation"] = function()
+	local on_prepare
+	local captured_runtime
+	local captured_env_runtime
+	local on_exit
+	local runner_calls = 0
+	postgres.prepare = function(snapshot, options, callback)
+		eq(snapshot.id, context.snapshot(0).id)
+		eq(options, config.options())
+		on_prepare = callback
+	end
+	postgres.argv = function(connection, path, mode, runtime)
+		captured_runtime = runtime
+		return original_postgres_argv(connection, path, mode, runtime)
+	end
+	postgres.env = function(connection, options, runtime)
+		captured_env_runtime = runtime
+		return original_postgres_env(connection, options, runtime)
+	end
+	exec.runner = function(_, _, callback)
+		runner_calls = runner_calls + 1
+		on_exit = callback
+		return { kill = function() end }
+	end
+
+	local got
+	exec.run("SELECT 1;", {}, function(code, stdout)
+		got = { code = code, stdout = stdout }
+	end)
+	eq(runner_calls, 0)
+
+	local runtime = { password = "fake-password" }
+	on_prepare(runtime)
+	eq(runner_calls, 1)
+	eq(captured_runtime, runtime)
+	eq(captured_env_runtime, runtime)
+
+	on_exit({ code = 0, stdout = "ok", stderr = "" })
+	vim.wait(200, function() return got ~= nil end)
+	eq(got, { code = 0, stdout = "ok" })
+end
+
+T["does not invoke the CLI when backend preparation fails"] = function()
+	local runner_calls = 0
+	postgres.prepare = function(_, _, callback)
+		callback(nil, "fake-password")
+	end
+	exec.runner = function()
+		runner_calls = runner_calls + 1
+		return { kill = function() end }
+	end
+
+	local got
+	exec.run("SELECT 1;", {}, function(code, _, stderr)
+		got = { code = code, stderr = stderr }
+	end)
+
+	eq(runner_calls, 0)
+	eq(got.code, 1)
+	expect_match(got.stderr, "backend preparation failed")
+	eq(got.stderr:find("fake-password", 1, true), nil)
+end
+
+T["drops a preparation result when its context changes"] = function()
+	local on_prepare
+	local runner_calls = 0
+	postgres.prepare = function(_, _, callback)
+		on_prepare = callback
+	end
+	exec.runner = function()
+		runner_calls = runner_calls + 1
+		return { kill = function() end }
+	end
+
+	local snapshot = context.snapshot(0)
+	local delivered = false
+	exec.run("SELECT 1;", { context = snapshot }, function()
+		delivered = true
+	end)
+	assert(context.set_level(0, "database", "other", "test"))
+	on_prepare({})
+	vim.wait(100, function() return delivered end)
+
+	eq(runner_calls, 0)
+	eq(delivered, false)
+	eq(exec.slots[snapshot.id], nil)
+end
+
+T["retries once after a recognized credential authentication failure"] = function()
+	local callbacks, invalidated = {}, {}
+	local prepare_calls = 0
+	postgres.prepare = function(_, _, callback)
+		prepare_calls = prepare_calls + 1
+		callback({ credential_backed = true, credential_key = "public-profile", password = "fake-password" })
+	end
+	postgres.is_authentication_error = function(stderr)
+		return stderr == "authentication failed"
+	end
+	credentials.invalidate = function(key)
+		table.insert(invalidated, key)
+	end
+	exec.runner = function(_, _, callback)
+		table.insert(callbacks, callback)
+		return { kill = function() end }
+	end
+
+	local got
+	exec.run("SELECT 1;", {}, function(code, stdout)
+		got = { code = code, stdout = stdout }
+	end)
+	eq(#callbacks, 1)
+	callbacks[1]({ code = 1, stdout = "", stderr = "authentication failed" })
+	vim.wait(200, function() return #callbacks == 2 end)
+	eq(prepare_calls, 2)
+	eq(invalidated, { "public-profile" })
+
+	callbacks[2]({ code = 0, stdout = "ok", stderr = "" })
+	vim.wait(200, function() return got ~= nil end)
+	eq(got, { code = 0, stdout = "ok" })
+end
+
+T["does not retry SQL failures that are not authentication failures"] = function()
+	local callbacks = {}
+	postgres.prepare = function(_, _, callback)
+		callback({ credential_backed = true, credential_key = "public-profile", password = "fake-password" })
+	end
+	postgres.is_authentication_error = function()
+		return false
+	end
+	exec.runner = function(_, _, callback)
+		table.insert(callbacks, callback)
+		return { kill = function() end }
+	end
+
+	local got
+	exec.run("SELECT 1;", {}, function(code, _, stderr)
+		got = { code = code, stderr = stderr }
+	end)
+	callbacks[1]({ code = 1, stdout = "", stderr = "SQL compilation error" })
+	vim.wait(200, function() return got ~= nil end)
+
+	eq(#callbacks, 1)
+	eq(got, { code = 1, stderr = "SQL compilation error" })
+end
+
+T["does not retry when the context changes before the retry preparation completes"] = function()
+	local callbacks = {}
+	local retry_prepare
+	local prepare_calls = 0
+	postgres.prepare = function(_, _, callback)
+		prepare_calls = prepare_calls + 1
+		if prepare_calls == 1 then
+			callback({ credential_backed = true, credential_key = "public-profile", password = "fake-password" })
+		else
+			retry_prepare = callback
+		end
+	end
+	postgres.is_authentication_error = function()
+		return true
+	end
+	exec.runner = function(_, _, callback)
+		table.insert(callbacks, callback)
+		return { kill = function() end }
+	end
+
+	local snapshot = context.snapshot(0)
+	local delivered = false
+	exec.run("SELECT 1;", { context = snapshot }, function()
+		delivered = true
+	end)
+	callbacks[1]({ code = 1, stdout = "", stderr = "authentication failed" })
+	vim.wait(200, function() return retry_prepare ~= nil end)
+	assert(context.set_level(0, "database", "other", "test"))
+	retry_prepare({ credential_backed = true, credential_key = "public-profile", password = "fake-password" })
+	vim.wait(100, function() return delivered end)
+
+	eq(#callbacks, 1)
+	eq(delivered, false)
+	eq(exec.slots[snapshot.id], nil)
 end
 
 T["delivers the result when the captured context is unchanged"] = function()

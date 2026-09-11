@@ -4,10 +4,12 @@ local eq, expect_match = helpers.eq, helpers.expect_match
 local dbsh = require("dbsh")
 local context = require("dbsh.context")
 local exec = require("dbsh.exec")
+local credentials = require("dbsh.credentials")
 local results = require("dbsh.results")
 local csv = require("dbsh.csv")
 
 local original_runner
+local original_credentials_runner
 
 local T = MiniTest.new_set({
 	hooks = {
@@ -19,10 +21,14 @@ local T = MiniTest.new_set({
 				default = "local_db",
 			})
 			original_runner = exec.runner
+			original_credentials_runner = credentials.runner
+			credentials.clear()
 		end,
 		post_case = function()
 			exec.runner = original_runner
 			exec.slots = {}
+			credentials.runner = original_credentials_runner
+			credentials.clear()
 			for _, buf in ipairs(vim.api.nvim_list_bufs()) do
 				local name = vim.api.nvim_buf_get_name(buf)
 				if vim.api.nvim_buf_is_valid(buf) and vim.startswith(vim.fs.basename(name), "__DBSH__ ") then
@@ -32,6 +38,18 @@ local T = MiniTest.new_set({
 		end,
 	},
 })
+
+T["clears credentials before Neovim exits"] = function()
+	credentials.runner = function(_, _, callback)
+		callback({ code = 0, stdout = "fake-password\n", stderr = "" })
+	end
+	credentials.resolve("profile", { "password-command" }, { cache_ttl_ms = 100 }, function() end)
+	eq(next(credentials._cache) ~= nil, true)
+
+	vim.api.nvim_exec_autocmds("VimLeavePre", {})
+
+	eq(next(credentials._cache), nil)
+end
 
 T["finds the paragraph around the cursor line"] = function()
 	local lines = { "one", "", "SELECT 1", "FROM t;", "", "three" }

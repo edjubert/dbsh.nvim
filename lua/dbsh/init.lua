@@ -2,6 +2,7 @@
 
 local config = require("dbsh.config")
 local backends = require("dbsh.backends")
+local credentials = require("dbsh.credentials")
 local context = require("dbsh.context")
 local exec = require("dbsh.exec")
 local results = require("dbsh.results")
@@ -375,6 +376,13 @@ function M.setup(opts)
 			if config.options().lsp.mode == "managed" then
 				lsp.shutdown_managed()
 			end
+		end,
+	})
+
+	vim.api.nvim_create_autocmd("VimLeavePre", {
+		group = group,
+		callback = function()
+			credentials.clear()
 		end,
 	})
 end
