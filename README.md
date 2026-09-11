@@ -304,12 +304,26 @@ dbsh stores a sanitized per-context error and notifies once by default. Set
 `:DbLspStatus` reports the active public managed record or, in external mode,
 the user-owned/shared limitation and its last synchronized public context.
 
-Managed mode requires a PgLS binary containing `pgls/setDatabaseContext`. Roll
-out the PgLS protocol PR/MR first, then the dbsh PR/MR, and test dbsh against a
-merged or released PgLS binary before release. During development or review
-only, `lsp.command` may point to a locally built patched binary with an absolute
-path; keep that machine-specific path out of shared configuration and do not use
-it as a deployment setting.
+Managed mode requires a PgLS binary containing `pgls/setDatabaseContext`. It is
+not available in an unpatched PgLS release. Roll out the PgLS protocol change
+first, then dbsh, and test against a merged or released PgLS binary before
+release.
+
+Until PgLS ships that request, development and review can build the companion
+[PgLS context RPC commit](https://github.com/edjubert/postgres-language-server/commit/4ab9acd4441cdd6721e0a2d57e8e2935f5d90cf3):
+
+```bash
+git clone https://github.com/supabase-community/postgres-language-server.git
+cd postgres-language-server
+git fetch https://github.com/edjubert/postgres-language-server.git \
+  edjubert/pgls-database-context-rpc
+git checkout --detach FETCH_HEAD
+cargo build --release
+```
+
+An existing PgLS checkout may cherry-pick that same commit instead. Point
+`lsp.command` at the locally built binary only; do not put a machine-specific
+path in shared configuration.
 
 ## Commands
 
