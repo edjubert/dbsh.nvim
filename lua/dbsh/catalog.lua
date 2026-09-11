@@ -21,6 +21,7 @@ function M.request(snapshot, definition, options, callback)
 		query = options.query or "",
 		cursor = options.cursor,
 		limit = options.limit or M.page_size(),
+		relation = vim.deepcopy(options.relation),
 	}
 
 	local function respond(response, err)

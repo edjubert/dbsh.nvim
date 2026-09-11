@@ -36,7 +36,7 @@ T["uses the configured default page size and public context"] = function()
 	eq(page.items, { { name = "users" } })
 end
 
-T["forwards scope, query, cursor, and an explicit page size"] = function()
+T["forwards scope, query, cursor, relation, and an explicit page size"] = function()
 	config.setup({
 		connections = {
 			local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
@@ -57,12 +57,14 @@ T["forwards scope, query, cursor, and an explicit page size"] = function()
 		scope = { schema = "analytics", all_schemas = false },
 		query = "events",
 		cursor = "cursor-1",
+		relation = { oid = "42", schema = "analytics", name = "events" },
 	}, function() end)
 
 	eq(received.limit, 25)
 	eq(received.scope, { schema = "analytics", all_schemas = false })
 	eq(received.query, "events")
 	eq(received.cursor, "cursor-1")
+	eq(received.relation, { oid = "42", schema = "analytics", name = "events" })
 end
 
 T["turns malformed backend responses into a clear error"] = function()

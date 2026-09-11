@@ -316,6 +316,108 @@ T["offers load more only while the catalog has a cursor"] = function()
 	eq(cursors, { "initial", "next" })
 end
 
+T["maps relation inspection in both Telescope modes"] = function()
+	connect()
+	local catalog = require("dbsh.catalog")
+	local original_request, original_telescope = catalog.request, pickers._telescope
+	local captured = { maps = {}, results = {} }
+	local fake = {
+		pickers = {
+			new = function(_, opts)
+				return {
+					find = function()
+						table.insert(captured.results, opts.finder)
+						local maps = {}
+						table.insert(captured.maps, maps)
+						assert(opts.attach_mappings(1, function(mode, key, handler)
+							maps[mode .. "|" .. key] = handler
+						end))
+					end,
+				}
+			end,
+		},
+		finders = {
+			new_table = function(opts)
+				captured.last_results = opts.results
+				return {}
+			end,
+		},
+		conf = { generic_sorter = function(_) return {} end },
+		actions = { close = function() end },
+		state = {
+			get_selected_entry = function()
+				return { value = captured.last_results[1] }
+			end,
+		},
+	}
+	catalog.request = function(_, _, _, callback)
+		callback({
+			items = {
+				{
+					value = {
+						kind = "relation",
+						oid = "42",
+						schema = "public",
+						name = "users",
+						relkind = "r",
+					},
+					display = "public.users  [table]",
+					ordinal = "public users table",
+				},
+			},
+			next_cursor = nil,
+		}, nil)
+	end
+	pickers._telescope = function() return fake end
+
+	pickers.catalog("relations", { scope = { schema = "public", all_schemas = false } })
+	eq(type(captured.maps[1]["i|<C-i>"]), "function")
+	eq(type(captured.maps[1]["n|<C-i>"]), "function")
+	captured.maps[1]["i|<C-i>"]()
+
+	pickers._telescope = original_telescope
+	catalog.request = original_request
+	eq(captured.last_results[1].title, "Columns")
+	eq(captured.last_results[6].title, "Dependencies")
+	eq(captured.last_results[7].title, "Definition")
+end
+
+T["debounces a typed catalog filter before issuing the replacement request"] = function()
+	connect()
+	local catalog = require("dbsh.catalog")
+	local original_request, original_telescope = catalog.request, pickers._telescope
+	local requests, picker_options = {}, {}
+	local fake = {
+		pickers = {
+			new = function(_, opts)
+				table.insert(picker_options, opts)
+				return {
+					find = function()
+						assert(opts.attach_mappings(1, function() end))
+					end,
+				}
+			end,
+		},
+		finders = { new_table = function(_) return {} end },
+		conf = { generic_sorter = function(_) return {} end },
+		actions = { close = function() end },
+		state = { get_selected_entry = function() return nil end },
+	}
+	catalog.request = function(_, _, opts, callback)
+		table.insert(requests, opts.query or "")
+		callback({ items = {}, next_cursor = nil }, nil)
+	end
+	pickers._telescope = function() return fake end
+
+	pickers.catalog("relations", { scope = { schema = nil, all_schemas = true } })
+	picker_options[1].on_input_filter_cb("orders")
+	vim.wait(500, function() return #requests == 2 end)
+
+	pickers._telescope = original_telescope
+	catalog.request = original_request
+	eq(requests, { "", "orders" })
+end
+
 T["hands a selected object to its catalog action"] = function()
 	connect()
 	local backend = assert(context.backend(context.snapshot(0)))
