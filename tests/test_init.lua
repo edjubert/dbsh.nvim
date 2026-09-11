@@ -472,9 +472,9 @@ end
 
 T["refreshes the schema cache after a successful query"] = function()
 	local lsp = require("dbsh.lsp")
-	local original = lsp.invalidate_external
+	local original = lsp.invalidate
 	local snapshot
-	lsp.invalidate_external = function(value)
+	lsp.invalidate = function(value)
 		snapshot = value
 	end
 
@@ -490,7 +490,7 @@ T["refreshes the schema cache after a successful query"] = function()
 		return snapshot ~= nil
 	end)
 
-	lsp.invalidate_external = original
+	lsp.invalidate = original
 	eq(snapshot.id, context.snapshot(0).id)
 end
 
@@ -503,9 +503,9 @@ T["does not refresh the schema cache when the query fails"] = function()
 		safety = { mode = "off" },
 	})
 	local lsp = require("dbsh.lsp")
-	local original = lsp.invalidate_external
+	local original = lsp.invalidate
 	local calls = 0
-	lsp.invalidate_external = function()
+	lsp.invalidate = function()
 		calls = calls + 1
 	end
 
@@ -521,7 +521,7 @@ T["does not refresh the schema cache when the query fails"] = function()
 		return calls > 0
 	end)
 
-	lsp.invalidate_external = original
+	lsp.invalidate = original
 	eq(calls, 0)
 end
 
@@ -607,6 +607,117 @@ T["DbToggleResults and DbCancel affect only the active context"] = function()
 	eq(results.find_win(results.find_buf(snapshot_b)) ~= nil, true)
 	eq(handles[1].killed, true)
 	eq(handles[2].killed, false)
+end
+
+T["shows the active sanitized PgLS status"] = function()
+	local lsp = require("dbsh.lsp")
+	local original_status, original_notify = lsp.status_message, vim.notify
+	local seen, snapshot
+	lsp.status_message = function(value)
+		snapshot = value
+		return "dbsh.nvim: managed PgLS key=public state=ready"
+	end
+	vim.notify = function(message) seen = message end
+
+	vim.cmd("DbLspStatus")
+
+	vim.notify = original_notify
+	lsp.status_message = original_status
+	eq(seen, "dbsh.nvim: managed PgLS key=public state=ready")
+	eq(snapshot.id, context.snapshot(0).id)
+end
+
+T["routes LSP context, attach, and buffer lifecycle by mode"] = function()
+	local lsp = require("dbsh.lsp")
+	local originals = {
+		sync_external = lsp.sync_external,
+		sync_external_client = lsp.sync_external_client,
+		reconcile_managed = lsp.reconcile_managed,
+		detach_managed = lsp.detach_managed,
+		shutdown_managed = lsp.shutdown_managed,
+		start_client = lsp.start_client,
+		stop_client = lsp.stop_client,
+	}
+	local external, attached, managed, detached, shutdown, starts, stops = 0, 0, 0, 0, 0, 0, 0
+	lsp.sync_external = function() external = external + 1 end
+	lsp.sync_external_client = function() attached = attached + 1 end
+	lsp.reconcile_managed = function() managed = managed + 1 end
+	lsp.detach_managed = function() detached = detached + 1 end
+	lsp.shutdown_managed = function() shutdown = shutdown + 1 end
+	lsp.start_client = function() starts = starts + 1 end
+	lsp.stop_client = function() stops = stops + 1 end
+	local buf = vim.api.nvim_create_buf(false, true)
+
+	dbsh.setup({
+		connections = {
+			local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
+		},
+		default = "local_db",
+		lsp = { mode = "external" },
+	})
+	external = 0
+	vim.api.nvim_exec_autocmds("User", {
+		pattern = "DbshContextChanged",
+		data = { bufnr = buf },
+	})
+	vim.api.nvim_exec_autocmds("LspAttach", { buffer = buf, data = { client_id = 999 } })
+	vim.api.nvim_exec_autocmds("BufWipeout", { buffer = buf })
+	eq(external, 1)
+	eq(attached, 1)
+	eq(managed, 0)
+	eq(detached, 0)
+	eq(starts, 0)
+	eq(stops, 0)
+
+	dbsh.setup({
+		connections = {
+			local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
+		},
+		default = "local_db",
+		lsp = { mode = "managed" },
+	})
+	managed, attached, detached = 0, 0, 0
+	vim.api.nvim_exec_autocmds("User", {
+		pattern = "DbshContextChanged",
+		data = { bufnr = buf },
+	})
+	vim.api.nvim_exec_autocmds("LspAttach", { buffer = buf, data = { client_id = 999 } })
+	vim.api.nvim_exec_autocmds("BufDelete", { buffer = buf })
+	vim.api.nvim_exec_autocmds("VimLeavePre", {})
+	eq(managed, 1)
+	eq(attached, 0)
+	eq(detached, 1)
+	eq(shutdown, 1)
+
+	dbsh.setup({
+		connections = {
+			local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
+		},
+		default = "local_db",
+		lsp = { mode = "off" },
+	})
+	external, managed, attached, detached, shutdown = 0, 0, 0, 0, 0
+	vim.api.nvim_exec_autocmds("User", {
+		pattern = "DbshContextChanged",
+		data = { bufnr = buf },
+	})
+	vim.api.nvim_exec_autocmds("LspAttach", { buffer = buf, data = { client_id = 999 } })
+	vim.api.nvim_exec_autocmds("BufDelete", { buffer = buf })
+	vim.api.nvim_exec_autocmds("VimLeavePre", {})
+	eq(external, 0)
+	eq(managed, 0)
+	eq(attached, 0)
+	eq(detached, 0)
+	eq(shutdown, 0)
+
+	lsp.stop_client = originals.stop_client
+	lsp.start_client = originals.start_client
+	lsp.shutdown_managed = originals.shutdown_managed
+	lsp.detach_managed = originals.detach_managed
+	lsp.reconcile_managed = originals.reconcile_managed
+	lsp.sync_external_client = originals.sync_external_client
+	lsp.sync_external = originals.sync_external
+	vim.api.nvim_buf_delete(buf, { force = true })
 end
 
 return T
