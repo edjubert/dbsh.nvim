@@ -96,6 +96,7 @@ read-only definition buffer.
 - Neovim **0.10+** — the plugin uses `vim.system`, `vim.fn.getregion` and
   `vim.fs.joinpath`
 - `psql` on your `PATH`
+- `snow` on your `PATH` when using Snowflake profiles
 - [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim) — **optional**;
   every picker degrades to a clear message without it, and queries work fine
 - [postgres-language-server](https://github.com/supabase-community/postgres-language-server) —
@@ -178,6 +179,9 @@ require("dbsh").setup({
 	query_timeout = 30000,
 	preview_limit = 10,
 	catalog_page_size = 200,
+	credentials = {
+		cache_ttl_ms = 900000,
+	},
 	csv_delimiter = ",",
 	export_dir = vim.fs.joinpath(vim.fn.stdpath("data"), "dbsh", "exports"),
 	results_split = "horizontal",
@@ -197,6 +201,7 @@ require("dbsh").setup({
 | `query_timeout` | `30000` | Kills a runaway query, in milliseconds. |
 | `preview_limit` | `10` | `LIMIT` used when previewing a table from the picker. |
 | `catalog_page_size` | `200` | Number of catalog objects fetched per page. |
+| `credentials.cache_ttl_ms` | `900000` | In-memory credential cache lifetime for backends that require a password command. |
 | `csv_delimiter` | `","` | Column separator, for both CSV export and CSV yank. |
 | `export_dir` | `<stdpath("data")>/dbsh/exports` | Where `:DbExportCSV` suggests writing. |
 | `results_split` | `"horizontal"` | `"horizontal"`, `"vertical"` or `"float"`: which window opens `__DBSH__` in. Only applies the first time the window is created; combine with `vim.opt.splitright = true` for a right-hand split. `"float"` is styled after your telescope config, when installed. |
@@ -227,6 +232,53 @@ chmod 600 ~/.pgpass
 
 PostgreSQL silently ignores a `.pgpass` with looser permissions. The symptom is an
 unexpected password prompt, and it is the single most common setup mistake.
+
+### Snowflake
+
+Snowflake profiles use the `snow` CLI only. They are structured profiles: do not
+use a JDBC URL, a Snow CLI named connection, or a literal password.
+
+```lua
+require("dbsh").setup({
+	connections = {
+		warehouse = {
+			type = "snowflake",
+			host = "<account-host>",
+			port = 443,
+			username = "<username>",
+			authenticator = "<native-sso-authenticator-url>",
+			role = "<role>",
+			warehouse = "<warehouse>",
+			database = "<database>",
+			schema = "<optional-schema>",
+			password_command = {
+				"security",
+				"find-generic-password",
+				"-s",
+				"dbsh.snowflake.<profile>",
+				"-w",
+			},
+		},
+	},
+	default = "warehouse",
+})
+```
+
+`password_command` is an argv array, never a shell string. Its output is held
+only in memory and passed only as `SNOWFLAKE_PASSWORD` to the child `snow`
+process. dbsh caches it for 15 minutes by default, clears it on `VimLeavePre`,
+and invalidates it before one retry after a recognized authentication failure.
+
+Every Snowflake query receives the effective role, warehouse, database and
+schema as CLI flags. Manually typed `USE` statements affect only that command;
+they do not update dbsh's context. Raw catalog output uses `JSON_EXT`: scalars
+become cells, null becomes `(NULL)`, and complex values are compact JSON.
+
+Snowflake catalogs include roles, warehouses, databases, schemas, relations,
+functions, sequences, stages, file formats, streams, tasks and pipes. Catalog
+filters are literal and paged. dbsh's confirmation prompt remains an ergonomic
+guardrail; Snowflake role permissions remain the security authority. Run
+`make snowflake-smoke` to verify a private non-mutating connection locally.
 
 ## Language server
 
@@ -354,6 +406,11 @@ context. PostgreSQL provides:
 
 Catalog searches are literal server-side filters, not arbitrary SQL. They use
 deterministic keyset pagination; choose **Load more** to fetch the next page.
+
+Snowflake provides `:DbRoles`, `:DbWarehouses`, `:DbDatabases`, `:DbSchemas`,
+`:DbRelations`, `:DbFunctions`, `:DbSequences`, `:DbStages`,
+`:DbFileFormats`, `:DbStreams`, `:DbTasks` and `:DbPipes`. Context commands
+and object catalogs share these names where selecting the value is meaningful.
 
 ### Compatibility note
 

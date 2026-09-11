@@ -84,6 +84,22 @@ T["returns sanitized errors for malformed JSON_EXT output"] = function()
 	eq(err:find("fake-password", 1, true), nil)
 end
 
+T["uses the final result set from a multi-statement JSON_EXT response"] = function()
+	local rows, err = snowflake.parse_raw(
+		'[[{"IGNORED":"show result"}],[{"NAME":"ANALYST","OBJECT_TYPE":"role"}]]'
+	)
+
+	eq(err, nil)
+	eq(rows, { { "ANALYST", "role" } })
+end
+
+T["uses the final result set when an earlier SHOW result is empty"] = function()
+	local rows, err = snowflake.parse_raw('[[],[{"NAME":"TASK","OBJECT_TYPE":"task"}]]')
+
+	eq(err, nil)
+	eq(rows, { { "TASK", "task" } })
+end
+
 T["recognizes only documented authentication failures"] = function()
 	eq(
 		snowflake.is_authentication_error(
@@ -93,6 +109,98 @@ T["recognizes only documented authentication failures"] = function()
 		true
 	)
 	eq(snowflake.is_authentication_error("SQL compilation error", ""), false)
+end
+
+T["declares every first-version Snowflake catalog"] = function()
+	local keys = vim.tbl_map(function(definition) return definition.key end, snowflake.catalogs)
+
+	eq(keys, {
+		"roles",
+		"warehouses",
+		"databases",
+		"schemas",
+		"relations",
+		"routines",
+		"sequences",
+		"stages",
+		"file_formats",
+		"streams",
+		"tasks",
+		"pipes",
+	})
+end
+
+T["builds paged, literal-safe catalog queries with active or all-schema scope"] = function()
+	local request = {
+		context = { levels = { database = "ANALYTICS", schema = "PUBLIC" } },
+		scope = { schema = "PUBLIC", all_schemas = false },
+		query = "order%_!",
+		limit = 10,
+	}
+	local scoped = assert(snowflake.catalog_query("relations", request))
+	expect_match(scoped, "INFORMATION_SCHEMA%.TABLES")
+	expect_match(scoped, "TABLE_SCHEMA = 'PUBLIC'")
+	expect_match(scoped, "order!%%!_!!")
+	expect_match(scoped, "ORDER BY")
+	expect_match(scoped, "LIMIT 11")
+
+	request.scope = { schema = nil, all_schemas = true }
+	local all_schemas = assert(snowflake.catalog_query("relations", request))
+	eq(all_schemas:find("TABLE_SCHEMA = 'PUBLIC'", 1, true), nil)
+end
+
+T["forwards an opaque catalog cursor through a stable keyset predicate"] = function()
+	local sql = assert(snowflake.catalog_query("relations", {
+		context = { levels = { database = "ANALYTICS" } },
+		scope = { schema = nil, all_schemas = true },
+		query = "",
+		cursor = vim.json.encode({ "PUBLIC", "ORDERS" }),
+		limit = 25,
+	}))
+
+	expect_match(sql, "TABLE_SCHEMA > 'PUBLIC'")
+	expect_match(sql, "TABLE_NAME > 'ORDERS'")
+	expect_match(sql, "LIMIT 26")
+end
+
+T["uses SHOW plus RESULT_SCAN for account-level catalogs"] = function()
+	local request = { context = { levels = {} }, scope = {}, query = "", limit = 5 }
+
+	expect_match(assert(snowflake.catalog_query("roles", request)), "SHOW ROLES")
+	expect_match(assert(snowflake.catalog_query("warehouses", request)), "SHOW WAREHOUSES")
+	expect_match(assert(snowflake.catalog_query("databases", request)), "SHOW DATABASES")
+	expect_match(assert(snowflake.catalog_query("roles", request)), "RESULT_SCAN")
+end
+
+T["keeps INFORMATION_SCHEMA queries valid when no optional predicate is selected"] = function()
+	local sql = assert(snowflake.catalog_query("schemas", {
+		context = { levels = { database = "ANALYTICS" } },
+		scope = { schema = nil, all_schemas = false },
+		query = "",
+		limit = 1,
+	}))
+
+	expect_match(sql, "WHERE TRUE")
+end
+
+T["builds a supported normalized Snowflake definition request"] = function()
+	local request = assert(snowflake.definition_request({
+		connection = connection,
+		levels = { database = "ANALYTICS" },
+	}, {
+		kind = "relation",
+		database = "ANALYTICS",
+		schema = "PUBLIC",
+		name = "ORDERS",
+		relation_type = "BASE TABLE",
+		identity = { database = "ANALYTICS", schema = "PUBLIC", name = "ORDERS" },
+	}))
+	expect_match(request.sql, "GET_DDL")
+	expect_match(request.sql, "ANALYTICS%.PUBLIC%.ORDERS")
+
+	local unsupported, err = snowflake.definition_request({ connection = connection }, { kind = "task" })
+	eq(unsupported, nil)
+	expect_match(err, "not available")
 end
 
 return T

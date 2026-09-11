@@ -91,4 +91,19 @@ T["reports load-more eligibility only when a cursor exists"] = function()
 	})
 end
 
+T["keeps a temporary all-schema scope public and non-mutating"] = function()
+	local received
+	catalog.request(context.snapshot(0), {
+		list = function(request, callback)
+			received = request
+			callback({ items = {}, next_cursor = nil }, nil)
+		end,
+	}, {
+		scope = { schema = nil, all_schemas = true },
+	}, function() end)
+
+	eq(received.scope, { schema = nil, all_schemas = true })
+	eq(context.current(0).levels.schema, nil)
+end
+
 return T

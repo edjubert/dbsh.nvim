@@ -45,7 +45,7 @@ local function object_identity(object)
 		oid = object.oid and tostring(object.oid) or nil,
 	}
 	if identity.oid == nil then
-		identity.qualified_name = {
+		identity.qualified_name = vim.deepcopy(object.identity) or {
 			schema = object.schema,
 			relation = object.relation and object.relation.name or nil,
 			name = object.name,
@@ -135,6 +135,19 @@ local function render_error(record, err)
 	render(record, "-- dbsh.nvim: " .. tostring(err))
 end
 
+local function render_success(record, request, stdout)
+	if type(request.parse) ~= "function" then
+		render(record, stdout)
+		return
+	end
+	local ok, output, err = pcall(request.parse, stdout)
+	if not ok or output == nil then
+		render_error(record, "definition output could not be parsed")
+		return
+	end
+	render(record, output)
+end
+
 local function focus(record)
 	if not valid(record) then
 		return nil
@@ -219,7 +232,7 @@ local function refresh(record)
 			return
 		end
 		if code == 0 then
-			render(record, stdout)
+			render_success(record, record.request, stdout)
 			return
 		end
 		local fallback = record.request.fallback
