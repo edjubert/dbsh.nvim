@@ -47,7 +47,7 @@ local function run_query(sql, snapshot)
 			end
 			results.render(snapshot, sql, output, split_opts)
 			if code == 0 then
-				lsp.invalidate_external(snapshot)
+				lsp.invalidate(snapshot)
 			end
 		end)
 	end)
@@ -330,6 +330,7 @@ end
 function M.setup(opts)
 	config.setup(opts)
 	context.setup()
+	lsp.setup()
 	last_queries = {}
 	declare_commands()
 
