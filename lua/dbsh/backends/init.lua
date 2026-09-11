@@ -20,4 +20,14 @@ function M.get(name)
 	return backend
 end
 
+function M.all()
+	local names = vim.tbl_keys(M.registry)
+	table.sort(names)
+	local definitions = {}
+	for _, name in ipairs(names) do
+		table.insert(definitions, M.registry[name])
+	end
+	return definitions
+end
+
 return M

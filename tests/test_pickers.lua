@@ -8,20 +8,23 @@ local scratch = require("dbsh.scratch")
 
 local T = MiniTest.new_set()
 
-T["reports a clear error when telescope is unavailable"] = function()
+T["falls back to a UI selector when telescope is unavailable"] = function()
 	local original = pickers._telescope
+	local original_select = vim.ui.select
 	pickers._telescope = function() return nil end
 
-	local notified
-	local original_notify = vim.notify
-	vim.notify = function(msg) notified = msg end
+	local asked
+	vim.ui.select = function(_, opts, callback)
+		asked = opts
+		callback(nil)
+	end
 
 	pickers.connections()
 
-	vim.notify = original_notify
+	vim.ui.select = original_select
 	pickers._telescope = original
 
-	expect_match(notified, "telescope")
+	eq(asked.prompt, "dbsh connections: ")
 end
 
 T["falls back to an input prompt when telescope is unavailable"] = function()
@@ -207,62 +210,113 @@ T["binds the active buffer when selecting a connection"] = function()
 		actions = { close = function() end },
 		state = { get_selected_entry = function() return { value = "staging" } end },
 	}
-	local original_telescope, original_notify = pickers._telescope, vim.notify
+	local original_telescope, original_notify, original_context = pickers._telescope, vim.notify, pickers.context
+	local selected
 	pickers._telescope = function() return fake end
 	vim.notify = function() end
+	pickers.context = function(key, opts) selected = { key = key, opts = opts } end
 
 	pickers.connections()
 	maps["i|<CR>"]()
 
+	pickers.context = original_context
 	vim.notify = original_notify
 	pickers._telescope = original_telescope
 	eq(context.current(0).connection_name, "staging")
+	eq(selected.key, "database")
+	eq(selected.opts.preferred, "app")
 end
 
-T["reports a level the backend does not declare"] = function()
+T["reports a catalog the backend does not declare"] = function()
 	connect()
-	local original = pickers._telescope
-	-- Non-nil so the telescope guard passes; nothing is ever opened, the
-	-- missing level is caught first.
-	pickers._telescope = function() return {} end
-
 	local notified
 	local original_notify = vim.notify
 	vim.notify = function(msg) notified = msg end
 
-	pickers.level(9, {})
+	pickers.catalog("missing")
 
 	vim.notify = original_notify
-	pickers._telescope = original
-	expect_match(notified, "level")
+	expect_match(notified, "not available")
 end
 
-T["fixes the connection level when selecting a set_level item"] = function()
+T["applies a selected context value to the active buffer"] = function()
 	connect()
-	local backend = assert(context.backend(context.snapshot(0)))
+	local exec = require("dbsh.exec")
+	local original_runner = exec.runner
+	local original_telescope, original_select = pickers._telescope, vim.ui.select
+	exec.runner = function(_, _, callback)
+		vim.schedule(function()
+			callback({ code = 0, stdout = "postgres\nanalytics\n", stderr = "" })
+		end)
+		return { kill = function() end }
+	end
+	pickers._telescope = function() return nil end
+	vim.ui.select = function(items, _, callback) callback(items[2]) end
 	local original_notify = vim.notify
 	vim.notify = function() end
 
-	pickers.select(backend, 1, {}, "analytics")
+	pickers.context("database")
+	vim.wait(500, function() return context.current(0).levels.database == "analytics" end)
 
 	vim.notify = original_notify
+	vim.ui.select = original_select
+	pickers._telescope = original_telescope
+	exec.runner = original_runner
 	eq(context.current(0).connection.database, "analytics")
 end
 
-T["descends into the next level with an enriched context"] = function()
+T["uses an all-schema scope without persisting it in context"] = function()
 	connect()
-	local backend = assert(context.backend(context.snapshot(0)))
-	local original_level = pickers.level
+	local catalog = require("dbsh.catalog")
+	local original_request, original_select = catalog.request, vim.ui.select
 	local seen
-	pickers.level = function(index, ctx) seen = { index = index, ctx = ctx } end
+	local selections = {
+		{ kind = "all" },
+		nil,
+	}
+	catalog.request = function(_, _, opts, callback)
+		seen = opts
+		callback({ items = {}, next_cursor = nil }, nil)
+	end
+	vim.ui.select = function(_, _, callback) callback(table.remove(selections, 1)) end
 
-	pickers.select(backend, 2, {}, "analytics")
+	pickers.catalog("relations")
 
-	pickers.level = original_level
-	eq(seen, { index = 3, ctx = { schema = "analytics" } })
+	vim.ui.select = original_select
+	catalog.request = original_request
+	eq(seen.scope, { schema = nil, all_schemas = true })
+	eq(context.current(0).levels.schema, nil)
 end
 
-T["hands the selected item to the leaf handler"] = function()
+T["offers load more only while the catalog has a cursor"] = function()
+	connect()
+	local catalog = require("dbsh.catalog")
+	local original_request, original_select = catalog.request, vim.ui.select
+	local cursors, selections = {}, 0
+	catalog.request = function(_, _, opts, callback)
+		table.insert(cursors, opts.cursor or "initial")
+		if opts.cursor == nil then
+			callback({
+				items = { { schema = "public", name = "users", kind = "r" } },
+				next_cursor = "next",
+			}, nil)
+		else
+			callback({ items = {}, next_cursor = nil }, nil)
+		end
+	end
+	vim.ui.select = function(items, _, callback)
+		selections = selections + 1
+		callback(selections == 1 and items[#items] or nil)
+	end
+
+	pickers.catalog("relations", { scope = { schema = nil, all_schemas = true } })
+
+	vim.ui.select = original_select
+	catalog.request = original_request
+	eq(cursors, { "initial", "next" })
+end
+
+T["hands a selected object to its catalog action"] = function()
 	connect()
 	local backend = assert(context.backend(context.snapshot(0)))
 	local dbsh = require("dbsh")
@@ -270,7 +324,7 @@ T["hands the selected item to the leaf handler"] = function()
 	local asked
 	dbsh.query = function(sql) asked = sql end
 
-	pickers.select(backend, 3, {}, { schema = "public", name = "users" })
+	backend.catalogs[1].on_select({ schema = "public", name = "users" }, context.snapshot(0))
 
 	dbsh.query = original_query
 	expect_match(asked, "public")

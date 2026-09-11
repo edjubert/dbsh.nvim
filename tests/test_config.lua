@@ -25,6 +25,29 @@ T["applies default options"] = function()
 	eq(config.options().connect_timeout, 5)
 	eq(config.options().query_timeout, 30000)
 	eq(config.options().preview_limit, 10)
+	eq(config.options().catalog_page_size, 200)
+end
+
+T["accepts a positive catalog page size"] = function()
+	config.setup({ connections = {}, catalog_page_size = 25 })
+	eq(config.options().catalog_page_size, 25)
+end
+
+T["falls back from a non-positive catalog page size with a clear warning"] = function()
+	local original_notify = vim.notify
+	local notified
+	vim.notify = function(message) notified = message end
+
+	config.setup({ connections = {}, catalog_page_size = 0 })
+
+	vim.notify = original_notify
+	eq(config.options().catalog_page_size, 200)
+	expect_match(notified, "catalog_page_size")
+end
+
+T["falls back from a fractional catalog page size"] = function()
+	config.setup({ connections = {}, catalog_page_size = 2.5 })
+	eq(config.options().catalog_page_size, 200)
 end
 
 T["lists connection names sorted"] = function()

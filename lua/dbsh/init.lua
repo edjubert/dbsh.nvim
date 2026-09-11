@@ -1,6 +1,7 @@
 -- Public API and user commands for dbsh.nvim.
 
 local config = require("dbsh.config")
+local backends = require("dbsh.backends")
 local context = require("dbsh.context")
 local exec = require("dbsh.exec")
 local results = require("dbsh.results")
@@ -207,25 +208,32 @@ local function pickers()
 	return require("dbsh.telescope.pickers")
 end
 
-local level_commands = {}
-
-local function declare_level_commands()
-	for _, name in ipairs(level_commands) do
-		pcall(vim.api.nvim_del_user_command, name)
+local function contract_for(backend, kind, key)
+	for _, definition in ipairs(backend[kind] or {}) do
+		if definition.key == key then
+			return definition
+		end
 	end
-	level_commands = {}
+	return nil
+end
 
-	local backend = context.backend(context.snapshot(0))
+local function dispatch_contract(kind, key, command_name)
+	local backend, err = context.backend(context.snapshot(0))
 	if backend == nil then
+		vim.notify("dbsh.nvim: " .. err, vim.log.levels.WARN)
 		return
 	end
-
-	for index, level in ipairs(backend.levels) do
-		local name = "Db" .. level.command
-		vim.api.nvim_create_user_command(name, function()
-			pickers().level(index, {})
-		end, {})
-		table.insert(level_commands, name)
+	if contract_for(backend, kind, key) == nil then
+		vim.notify(
+			string.format("dbsh.nvim: %s is not available for %s", command_name, backend.name),
+			vim.log.levels.WARN
+		)
+		return
+	end
+	if kind == "contexts" then
+		pickers().context(key)
+	else
+		pickers().catalog(key)
 	end
 end
 
@@ -233,7 +241,15 @@ local function declare_commands()
 	local command = vim.api.nvim_create_user_command
 
 	command("DbConnections", function() pickers().connections() end, {})
+	command("DbGlobalConnection", function() pickers().global_connection() end, {})
+	command("DbForgetConnection", function()
+		local _, err = context.forget(0, "forget")
+		if err ~= nil then
+			vim.notify("dbsh.nvim: " .. err, vim.log.levels.WARN)
+		end
+	end, {})
 	command("DbTemp", function() pickers().scratchpads() end, {})
+	command("DbObjects", function() pickers().objects() end, {})
 	command("DbCancel", function() exec.cancel("user", active_snapshot()) end, {})
 	command("DbToggleResults", function()
 		local ok = results.toggle(active_snapshot(), { split = config.options().results_split })
@@ -259,6 +275,24 @@ local function declare_commands()
 			connection.database
 		))
 	end, {})
+
+	local declared = {}
+	for _, backend in ipairs(backends.all()) do
+		for _, kind in ipairs({ "contexts", "catalogs" }) do
+			for _, definition in ipairs(backend[kind] or {}) do
+				local name = "Db" .. definition.command
+				if not declared[name] then
+					declared[name] = true
+					local command_kind = kind
+					local command_key = definition.key
+					local command_name = name
+					command(name, function()
+						dispatch_contract(command_kind, command_key, command_name)
+					end, {})
+				end
+			end
+		end
+	end
 end
 
 function M.setup(opts)
@@ -268,13 +302,6 @@ function M.setup(opts)
 	declare_commands()
 
 	local group = vim.api.nvim_create_augroup("dbsh", { clear = true })
-	vim.api.nvim_create_autocmd("User", {
-		pattern = "DbshContextChanged",
-		group = group,
-		callback = declare_level_commands,
-	})
-	declare_level_commands()
-
 	vim.api.nvim_create_autocmd("User", {
 		pattern = "DbshContextChanged",
 		group = group,

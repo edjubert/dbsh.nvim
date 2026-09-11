@@ -57,6 +57,7 @@ end
 T["declares every backend-agnostic command"] = function()
 	for _, name in ipairs({
 		"DbConnections", "DbTemp", "DbCancel", "DbToggleResults", "DbInfo",
+		"DbObjects", "DbGlobalConnection", "DbForgetConnection",
 	}) do
 		eq(vim.fn.exists(":" .. name), 2)
 	end
@@ -74,29 +75,51 @@ T["opens the scratchpad catalog from DbTemp"] = function()
 	eq(calls, 1)
 end
 
-T["generates one command per level the backend declares"] = function()
-	for _, name in ipairs({ "DbDatabases", "DbSchemas", "DbTables" }) do
+T["declares context and catalog commands from the backend union"] = function()
+	for _, name in ipairs({ "DbDatabases", "DbSchemas", "DbRelations", "DbTables" }) do
 		eq(vim.fn.exists(":" .. name), 2)
 	end
 end
 
-T["drops the catalog commands of a connection with no backend"] = function()
-	local config = require("dbsh.config")
+T["keeps catalog commands declared and dispatches by active backend"] = function()
+	local backends = require("dbsh.backends")
+	local previous = backends.registry.fake
+	backends.registry.fake = {
+		name = "fake",
+		contexts = {},
+		catalogs = {},
+	}
 	dbsh.setup({
 		connections = {
 			local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
-			weird = { type = "oracle", host = "h", port = 1, database = "d", username = "u" },
+			weird = { type = "fake", host = "h", port = 1, database = "d", username = "u" },
 		},
 		default = "local_db",
 	})
-	eq(vim.fn.exists(":DbTables"), 2)
+	local a = vim.api.nvim_create_buf(false, true)
+	local b = vim.api.nvim_create_buf(false, true)
+	assert(context.bind(a, "local_db", "test"))
+	assert(context.bind(b, "weird", "test"))
+	local pickers = require("dbsh.telescope.pickers")
+	local original_catalog, original_notify = pickers.catalog, vim.notify
+	local called, notified
+	pickers.catalog = function(key) called = key end
+	vim.notify = function(message) notified = message end
 
-	assert(context.bind(0, "weird", "test"))
-	eq(vim.fn.exists(":DbTables"), 0)
+	vim.api.nvim_set_current_buf(a)
+	vim.cmd("DbRelations")
+	vim.api.nvim_set_current_buf(b)
+	vim.cmd("DbRelations")
 
-	-- And they come back when a usable connection does.
-	assert(context.bind(0, "local_db", "test"))
+	vim.notify = original_notify
+	pickers.catalog = original_catalog
+	backends.registry.fake = previous
 	eq(vim.fn.exists(":DbTables"), 2)
+	eq(called, "relations")
+	expect_match(notified, "not available")
+
+	vim.api.nvim_buf_delete(a, { force = true })
+	vim.api.nvim_buf_delete(b, { force = true })
 end
 
 T["refuses an empty query"] = function()
