@@ -102,6 +102,14 @@ local function normalize_lsp(raw_lsp)
 	end
 end
 
+local function validate_snowflake_profile(connection)
+	if connection.type ~= "snowflake" then
+		return true
+	end
+	local backend = assert(backends.get("snowflake"))
+	return backend.validate(connection)
+end
+
 function M.setup(opts)
 	local input = vim.deepcopy(opts or {})
 	local raw_lsp = input.lsp
@@ -143,7 +151,12 @@ function M.connection(name)
 	if connection == nil then
 		return nil, string.format("unknown connection '%s'", tostring(name))
 	end
-	return vim.deepcopy(connection)
+	local copy = vim.deepcopy(connection)
+	local valid, err = validate_snowflake_profile(copy)
+	if valid == nil then
+		return nil, err
+	end
+	return copy
 end
 
 function M.default_name()
