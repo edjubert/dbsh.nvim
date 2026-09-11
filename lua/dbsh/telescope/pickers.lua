@@ -6,6 +6,7 @@
 
 local config = require("dbsh.config")
 local context = require("dbsh.context")
+local scratch = require("dbsh.scratch")
 
 local M = {}
 
@@ -86,6 +87,160 @@ function M.connections()
 				else
 					vim.notify("psql.nvim: connected to " .. entry.value)
 				end
+			end)
+			return true
+		end,
+	})
+end
+
+local function scratchpad_label(item)
+	if item.kind == "new" then
+		return "New scratchpad"
+	end
+	if item.kind == "legacy" then
+		return "Migrate legacy scratchpad: " .. item.connection_name
+	end
+	if item.error ~= nil then
+		return string.format("%s (metadata unavailable)", item.id)
+	end
+	local metadata = item.metadata
+	local levels = {}
+	for key, value in pairs(metadata.levels or {}) do
+		table.insert(levels, key .. "=" .. tostring(value))
+	end
+	table.sort(levels)
+	return table.concat({
+		metadata.name,
+		metadata.backend,
+		metadata.connection_name or "no connection",
+		table.concat(levels, ", "),
+	}, " — ")
+end
+
+local function scratchpad_entry(item)
+	local label = scratchpad_label(item)
+	return { value = item, display = label, ordinal = label }
+end
+
+local function choose_project_root(callback)
+	local choices = {
+		{ kind = "current", label = "Current/project directory" },
+		{ kind = "choose", label = "Choose directory" },
+		{ kind = "standalone", label = "Standalone" },
+	}
+	vim.ui.select(choices, {
+		prompt = "dbsh scratchpad project root: ",
+		format_item = function(choice) return choice.label end,
+	}, function(choice)
+		if choice == nil then
+			return
+		end
+		if choice.kind == "current" then
+			callback(vim.fn.getcwd())
+		elseif choice.kind == "choose" then
+			vim.ui.input({
+				prompt = "dbsh scratchpad directory: ",
+				default = vim.fn.getcwd(),
+				completion = "dir",
+			}, function(directory)
+				if directory ~= nil and vim.trim(directory) ~= "" then
+					callback(vim.trim(directory))
+				end
+			end)
+		else
+			callback(nil)
+		end
+	end)
+end
+
+function M.new_scratchpad()
+	vim.ui.select(config.names(), {
+		prompt = "dbsh scratchpad connection: ",
+	}, function(connection_name)
+		if connection_name == nil then
+			return
+		end
+		local connection, err = config.connection(connection_name)
+		if connection == nil then
+			return notify_error(err)
+		end
+		local levels = {}
+		for _, key in ipairs({ "database", "schema", "role", "warehouse" }) do
+			if connection[key] ~= nil then
+				levels[key] = connection[key]
+			end
+		end
+
+		choose_project_root(function(project_root)
+			vim.ui.input({
+				prompt = "dbsh scratchpad name: ",
+				default = connection_name,
+			}, function(name)
+				if name == nil or vim.trim(name) == "" then
+					return
+				end
+				local item, create_err = scratch.create({
+					name = vim.trim(name),
+					backend = connection.type or "postgres",
+					connection_name = connection_name,
+					levels = levels,
+					project_root = project_root,
+				})
+				if item == nil then
+					return notify_error(create_err)
+				end
+				scratch.open(item.id)
+			end)
+		end)
+	end)
+end
+
+local function select_scratchpad(item)
+	if item == nil then
+		return
+	end
+	if item.kind == "new" then
+		return M.new_scratchpad()
+	end
+	if item.kind == "legacy" then
+		local migrated, err = scratch.migrate_legacy(item.connection_name)
+		if migrated == nil then
+			return notify_error(err)
+		end
+		return scratch.open(migrated.id)
+	end
+	if item.error ~= nil then
+		return notify_error(item.error)
+	end
+	scratch.open(item.id)
+end
+
+function M.scratchpads()
+	local items = { { kind = "new" } }
+	for _, item in ipairs(scratch.list()) do
+		table.insert(items, item)
+	end
+	for _, item in ipairs(scratch.legacy()) do
+		item.kind = "legacy"
+		table.insert(items, item)
+	end
+
+	local t = M._telescope()
+	if t == nil then
+		vim.ui.select(items, {
+			prompt = "dbsh scratchpads: ",
+			format_item = scratchpad_label,
+		}, select_scratchpad)
+		return
+	end
+
+	open(t, {
+		title = "dbsh scratchpads",
+		results = items,
+		entry_maker = scratchpad_entry,
+		attach_mappings = function(bufnr, map)
+			bind_enter(t, bufnr, map, function(entry)
+				select_scratchpad(entry and entry.value)
 			end)
 			return true
 		end,

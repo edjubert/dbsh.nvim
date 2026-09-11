@@ -43,11 +43,13 @@ local function context_for_profile(name, kind, bufnr, previous)
 			id = previous and previous.id or next_id(kind, bufnr),
 			kind = kind,
 			bufnr = bufnr,
+			scratchpad_id = previous and previous.scratchpad_id or nil,
 			connection_name = nil,
 			connection = nil,
 			backend_name = nil,
 			levels = {},
 			project_root = nil,
+			on_change = previous and previous.on_change or nil,
 			generation = previous and previous.generation or 0,
 		}
 	end
@@ -61,11 +63,13 @@ local function context_for_profile(name, kind, bufnr, previous)
 		id = previous and previous.id or next_id(kind, bufnr),
 		kind = kind,
 		bufnr = bufnr,
+		scratchpad_id = previous and previous.scratchpad_id or nil,
 		connection_name = name,
 		connection = connection,
 		backend_name = connection.type or "postgres",
 		levels = levels_from(connection),
 		project_root = previous and previous.project_root or nil,
+		on_change = previous and previous.on_change or nil,
 		generation = previous and previous.generation or 0,
 	}
 end
@@ -83,6 +87,7 @@ local function public(value)
 		id = value.id,
 		kind = value.kind,
 		bufnr = value.bufnr,
+		scratchpad_id = value.scratchpad_id,
 		connection_name = value.connection_name,
 		backend = value.backend_name,
 		levels = vim.deepcopy(value.levels),
@@ -93,6 +98,16 @@ local function public(value)
 		result[key] = level
 	end
 	return result
+end
+
+local function persist(current)
+	if type(current.on_change) ~= "function" then
+		return
+	end
+	local ok, err = pcall(current.on_change, public(current))
+	if not ok then
+		vim.notify("dbsh.nvim: could not persist context: " .. tostring(err), vim.log.levels.ERROR)
+	end
 end
 
 local function announce(bufnr, origin, previous, current)
@@ -165,12 +180,18 @@ function M.bind(bufnr, connection_name, origin)
 	bufnr = concrete_bufnr(bufnr)
 	local previous = vim.deepcopy(effective(bufnr))
 	local existing = state.buffers[bufnr]
-	local current, err = context_for_profile(connection_name, "buffer", bufnr, existing)
+	local current, err = context_for_profile(
+		connection_name,
+		existing and existing.kind or "buffer",
+		bufnr,
+		existing
+	)
 	if current == nil then
 		return nil, err
 	end
 	current.generation = (existing and existing.generation or 0) + 1
 	state.buffers[bufnr] = current
+	persist(current)
 	announce(bufnr, origin, previous, current)
 	return current
 end
@@ -185,6 +206,7 @@ function M.set_level(bufnr, key, value, origin)
 	current.connection[key] = value
 	current.levels[key] = value
 	current.generation = current.generation + 1
+	persist(current)
 	announce(bufnr, origin, previous, current)
 	return current
 end
@@ -230,14 +252,22 @@ function M.is_current(snapshot)
 	return current ~= nil and current.id == snapshot.id and current.generation == snapshot.generation
 end
 
--- Reserved for persistent session support in Task 3.
 function M.attach(bufnr, value)
 	bufnr = concrete_bufnr(bufnr)
 	local current = vim.deepcopy(value)
 	current.id = current.id or next_id("scratchpad", bufnr)
 	current.kind = current.kind or "scratchpad"
+	current.scratchpad_id = current.scratchpad_id or current.id
 	current.bufnr = bufnr
-	current.levels = current.levels or levels_from(current.connection)
+	current.connection = current.connection and vim.deepcopy(current.connection) or nil
+	current.levels = vim.deepcopy(current.levels or levels_from(current.connection))
+	if current.connection ~= nil then
+		for key, level in pairs(current.levels) do
+			current.connection[key] = level
+		end
+	end
+	current.backend_name = current.backend_name
+		or (current.connection and (current.connection.type or "postgres"))
 	current.generation = current.generation or 0
 	state.buffers[bufnr] = current
 	return current
