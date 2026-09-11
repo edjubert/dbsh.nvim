@@ -56,6 +56,30 @@ T["passes PGCONNECT_TIMEOUT and never PGPASSWORD"] = function()
 	eq(env.PGPASSWORD, nil)
 end
 
+T["names the language server it drives"] = function()
+	eq(postgres.lsp.client_name, "postgres_lsp")
+	eq(postgres.lsp.invalidate_command, "pgls.invalidateSchemaCache")
+end
+
+T["builds language server settings from the connection"] = function()
+	eq(postgres.lsp.settings(conn, { connect_timeout = 9 }), {
+		db = {
+			host = "localhost",
+			port = 5432,
+			username = "dev",
+			database = "postgres",
+			connTimeoutSecs = 9,
+		},
+	})
+end
+
+T["never puts a password in the language server settings"] = function()
+	local with_password = vim.tbl_extend("force", conn, { password = "hunter2" })
+	local settings = postgres.lsp.settings(with_password, {})
+	eq(settings.db.password, nil)
+	eq(settings.db.connTimeoutSecs, 5)
+end
+
 T["parses tab separated rows and skips blank lines"] = function()
 	eq(postgres.parse_raw("a\tb\tc\n\nd\te\tf\n"), { { "a", "b", "c" }, { "d", "e", "f" } })
 end

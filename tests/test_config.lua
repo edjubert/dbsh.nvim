@@ -140,9 +140,28 @@ T["announces a connection change"] = function()
 	})
 
 	config.set_connection("staging")
-	-- Changing a level keeps the same backend, so it must stay silent: the
-	-- event exists to redeclare the catalog commands.
 	config.set_level("database", "analytics")
+
+	vim.api.nvim_del_augroup_by_id(group)
+	eq(fired, 2)
+end
+
+T["defaults the language server integration to off"] = function()
+	eq(config.options().lsp.enabled, false)
+end
+
+T["announces the change when fixing a navigation level"] = function()
+	local fired = 0
+	local group = vim.api.nvim_create_augroup("dbsh_test_level_event", { clear = true })
+	vim.api.nvim_create_autocmd("User", {
+		pattern = "DbshConnectionChanged",
+		group = group,
+		callback = function()
+			fired = fired + 1
+		end,
+	})
+
+	config.set_level("database", "other")
 
 	vim.api.nvim_del_augroup_by_id(group)
 	eq(fired, 1)
