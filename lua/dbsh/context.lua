@@ -287,4 +287,35 @@ function M.detach(bufnr)
 	return previous
 end
 
+function M.resolved_project_root(snapshot)
+	snapshot = snapshot or M.snapshot(0)
+	if type(snapshot.project_root) == "string" and snapshot.project_root ~= "" then
+		return snapshot.project_root
+	end
+	return vim.fs.joinpath(vim.fn.stdpath("data"), "dbsh", "lsp")
+end
+
+function M.resolved_search_path(snapshot)
+	snapshot = snapshot or M.snapshot(0)
+	local search_path, seen = {}, {}
+	local function append(schema)
+		if type(schema) == "string" and schema ~= "" and not seen[schema] then
+			seen[schema] = true
+			table.insert(search_path, schema)
+		end
+	end
+
+	local connection = snapshot.connection or {}
+	append((snapshot.levels or {}).schema or connection.schema)
+	local configured = connection.search_path
+	if type(configured) == "string" then
+		append(configured)
+	elseif type(configured) == "table" then
+		for _, schema in ipairs(configured) do
+			append(schema)
+		end
+	end
+	return search_path
+end
+
 return M

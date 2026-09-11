@@ -152,7 +152,48 @@ T["lets the user declare variable patterns"] = function()
 end
 
 T["defaults the language server integration to off"] = function()
-	eq(config.options().lsp.enabled, false)
+	eq(config.options().lsp.mode, "off")
+	eq(config.options().lsp.command, { "postgres-language-server", "lsp-proxy" })
+	eq(config.options().lsp.client_pool, { strategy = "immediate", idle_timeout_ms = 30000 })
+	eq(config.options().lsp.notifications, { failures = true })
+end
+
+T["migrates legacy lsp.enabled values to explicit modes"] = function()
+	config.setup({ connections = {}, lsp = { enabled = true } })
+	eq(config.options().lsp.mode, "external")
+
+	config.setup({ connections = {}, lsp = { enabled = false } })
+	eq(config.options().lsp.mode, "off")
+end
+
+T["keeps an explicit lsp mode over the deprecated boolean"] = function()
+	config.setup({ connections = {}, lsp = { mode = "managed", enabled = false } })
+	eq(config.options().lsp.mode, "managed")
+end
+
+T["falls back from invalid LSP options without exposing the input table"] = function()
+	local original_notify = vim.notify
+	local messages = {}
+	vim.notify = function(message) table.insert(messages, message) end
+
+	config.setup({
+		connections = {},
+		lsp = {
+			mode = "broken",
+			command = { "" },
+			client_pool = { strategy = "later", idle_timeout_ms = -1 },
+			notifications = { failures = "yes" },
+		},
+	})
+
+	vim.notify = original_notify
+	eq(config.options().lsp.mode, "off")
+	eq(config.options().lsp.command, { "postgres-language-server", "lsp-proxy" })
+	eq(config.options().lsp.client_pool, { strategy = "immediate", idle_timeout_ms = 30000 })
+	eq(config.options().lsp.notifications, { failures = true })
+	for _, message in ipairs(messages) do
+		eq(message:find("table:", 1, true), nil)
+	end
 end
 
 return T

@@ -133,6 +133,16 @@ T["isolates snapshots from mutable runtime and declared configuration"] = functi
 	eq(config.options().connections.local_db.database, "postgres")
 end
 
+T["resolves a standalone project root and ordered PostgreSQL search path"] = function()
+	local snapshot = context.snapshot(0)
+	snapshot.project_root = nil
+	snapshot.levels.schema = "tenant"
+	snapshot.connection.search_path = { "extensions", "tenant", "public" }
+
+	eq(context.resolved_search_path(snapshot), { "tenant", "extensions", "public" })
+	eq(context.resolved_project_root(snapshot), vim.fs.joinpath(vim.fn.stdpath("data"), "dbsh", "lsp"))
+end
+
 T["emits redacted public data for context changes and the legacy event once"] = function()
 	local events, legacy = {}, 0
 	local group = vim.api.nvim_create_augroup("dbsh_test_context_events", { clear = true })
