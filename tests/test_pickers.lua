@@ -2,24 +2,29 @@ local helpers = dofile("tests/helpers.lua")
 local eq, expect_match = helpers.eq, helpers.expect_match
 
 local config = require("dbsh.config")
+local context = require("dbsh.context")
 local pickers = require("dbsh.telescope.pickers")
+local scratch = require("dbsh.scratch")
 
 local T = MiniTest.new_set()
 
-T["reports a clear error when telescope is unavailable"] = function()
+T["falls back to a UI selector when telescope is unavailable"] = function()
 	local original = pickers._telescope
+	local original_select = vim.ui.select
 	pickers._telescope = function() return nil end
 
-	local notified
-	local original_notify = vim.notify
-	vim.notify = function(msg) notified = msg end
+	local asked
+	vim.ui.select = function(_, opts, callback)
+		asked = opts
+		callback(nil)
+	end
 
 	pickers.connections()
 
-	vim.notify = original_notify
+	vim.ui.select = original_select
 	pickers._telescope = original
 
-	expect_match(notified, "telescope")
+	eq(asked.prompt, "dbsh connections: ")
 end
 
 T["falls back to an input prompt when telescope is unavailable"] = function()
@@ -174,63 +179,439 @@ local function connect()
 		},
 		default = "local_db",
 	})
+	context.setup()
 end
 
-T["reports a level the backend does not declare"] = function()
-	connect()
-	local original = pickers._telescope
-	-- Non-nil so the telescope guard passes; nothing is ever opened, the
-	-- missing level is caught first.
-	pickers._telescope = function() return {} end
+T["binds the active buffer when selecting a connection"] = function()
+	config.setup({
+		connections = {
+			local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
+			staging = { host = "db.example.com", port = 5432, database = "app", username = "readonly" },
+		},
+		default = "local_db",
+	})
+	context.setup()
 
+	local maps = {}
+	local fake = {
+		pickers = {
+			new = function(_, opts)
+				return {
+					find = function()
+						assert(opts.attach_mappings(1, function(mode, key, handler)
+							maps[mode .. "|" .. key] = handler
+						end))
+					end,
+				}
+			end,
+		},
+		finders = { new_table = function(_) return {} end },
+		conf = { generic_sorter = function(_) return {} end },
+		actions = { close = function() end },
+		state = { get_selected_entry = function() return { value = "staging" } end },
+	}
+	local original_telescope, original_notify, original_context = pickers._telescope, vim.notify, pickers.context
+	local selected
+	pickers._telescope = function() return fake end
+	vim.notify = function() end
+	pickers.context = function(key, opts) selected = { key = key, opts = opts } end
+
+	pickers.connections()
+	maps["i|<CR>"]()
+
+	pickers.context = original_context
+	vim.notify = original_notify
+	pickers._telescope = original_telescope
+	eq(context.current(0).connection_name, "staging")
+	eq(selected.key, "database")
+	eq(selected.opts.preferred, "app")
+end
+
+T["reports a catalog the backend does not declare"] = function()
+	connect()
 	local notified
 	local original_notify = vim.notify
 	vim.notify = function(msg) notified = msg end
 
-	pickers.level(9, {})
+	pickers.catalog("missing")
 
 	vim.notify = original_notify
-	pickers._telescope = original
-	expect_match(notified, "level")
+	expect_match(notified, "not available")
 end
 
-T["fixes the connection level when selecting a set_level item"] = function()
+T["applies a selected context value to the active buffer"] = function()
 	connect()
-	local backend = config.backend()
+	local exec = require("dbsh.exec")
+	local original_runner = exec.runner
+	local original_telescope, original_select = pickers._telescope, vim.ui.select
+	exec.runner = function(_, _, callback)
+		vim.schedule(function()
+			callback({ code = 0, stdout = "postgres\nanalytics\n", stderr = "" })
+		end)
+		return { kill = function() end }
+	end
+	pickers._telescope = function() return nil end
+	vim.ui.select = function(items, _, callback) callback(items[2]) end
 	local original_notify = vim.notify
 	vim.notify = function() end
 
-	pickers.select(backend, 1, {}, "analytics")
+	pickers.context("database")
+	vim.wait(500, function() return context.current(0).levels.database == "analytics" end)
 
 	vim.notify = original_notify
-	eq(config.current().database, "analytics")
+	vim.ui.select = original_select
+	pickers._telescope = original_telescope
+	exec.runner = original_runner
+	eq(context.current(0).connection.database, "analytics")
 end
 
-T["descends into the next level with an enriched context"] = function()
+T["uses an all-schema scope without persisting it in context"] = function()
 	connect()
-	local backend = config.backend()
-	local original_level = pickers.level
+	local catalog = require("dbsh.catalog")
+	local original_request, original_select = catalog.request, vim.ui.select
 	local seen
-	pickers.level = function(index, ctx) seen = { index = index, ctx = ctx } end
+	local selections = {
+		{ kind = "all" },
+		nil,
+	}
+	catalog.request = function(_, _, opts, callback)
+		seen = opts
+		callback({ items = {}, next_cursor = nil }, nil)
+	end
+	vim.ui.select = function(_, _, callback) callback(table.remove(selections, 1)) end
 
-	pickers.select(backend, 2, {}, "analytics")
+	pickers.catalog("relations")
 
-	pickers.level = original_level
-	eq(seen, { index = 3, ctx = { schema = "analytics" } })
+	vim.ui.select = original_select
+	catalog.request = original_request
+	eq(seen.scope, { schema = nil, all_schemas = true })
+	eq(context.current(0).levels.schema, nil)
 end
 
-T["hands the selected item to the leaf handler"] = function()
+T["offers load more only while the catalog has a cursor"] = function()
 	connect()
-	local backend = config.backend()
+	local catalog = require("dbsh.catalog")
+	local original_request, original_select = catalog.request, vim.ui.select
+	local cursors, selections = {}, 0
+	catalog.request = function(_, _, opts, callback)
+		table.insert(cursors, opts.cursor or "initial")
+		if opts.cursor == nil then
+			callback({
+				items = { { schema = "public", name = "users", kind = "r" } },
+				next_cursor = "next",
+			}, nil)
+		else
+			callback({ items = {}, next_cursor = nil }, nil)
+		end
+	end
+	vim.ui.select = function(items, _, callback)
+		selections = selections + 1
+		callback(selections == 1 and items[#items] or nil)
+	end
+
+	pickers.catalog("relations", { scope = { schema = nil, all_schemas = true } })
+
+	vim.ui.select = original_select
+	catalog.request = original_request
+	eq(cursors, { "initial", "next" })
+end
+
+T["maps relation inspection in both Telescope modes"] = function()
+	connect()
+	local catalog = require("dbsh.catalog")
+	local original_request, original_telescope = catalog.request, pickers._telescope
+	local captured = { maps = {}, results = {} }
+	local fake = {
+		pickers = {
+			new = function(_, opts)
+				return {
+					find = function()
+						table.insert(captured.results, opts.finder)
+						local maps = {}
+						table.insert(captured.maps, maps)
+						assert(opts.attach_mappings(1, function(mode, key, handler)
+							maps[mode .. "|" .. key] = handler
+						end))
+					end,
+				}
+			end,
+		},
+		finders = {
+			new_table = function(opts)
+				captured.last_results = opts.results
+				return {}
+			end,
+		},
+		conf = { generic_sorter = function(_) return {} end },
+		actions = { close = function() end },
+		state = {
+			get_selected_entry = function()
+				return { value = captured.last_results[1] }
+			end,
+		},
+	}
+	catalog.request = function(_, _, _, callback)
+		callback({
+			items = {
+				{
+					value = {
+						kind = "relation",
+						oid = "42",
+						schema = "public",
+						name = "users",
+						relkind = "r",
+					},
+					display = "public.users  [table]",
+					ordinal = "public users table",
+				},
+			},
+			next_cursor = nil,
+		}, nil)
+	end
+	pickers._telescope = function() return fake end
+
+	pickers.catalog("relations", { scope = { schema = "public", all_schemas = false } })
+	eq(type(captured.maps[1]["i|<C-i>"]), "function")
+	eq(type(captured.maps[1]["n|<C-i>"]), "function")
+	captured.maps[1]["i|<C-i>"]()
+
+	pickers._telescope = original_telescope
+	catalog.request = original_request
+	eq(captured.last_results[1].title, "Columns")
+	eq(captured.last_results[6].title, "Dependencies")
+	eq(captured.last_results[7].title, "Definition")
+end
+
+T["debounces a typed catalog filter before issuing the replacement request"] = function()
+	connect()
+	local catalog = require("dbsh.catalog")
+	local original_request, original_telescope = catalog.request, pickers._telescope
+	local requests, picker_options = {}, {}
+	local fake = {
+		pickers = {
+			new = function(_, opts)
+				table.insert(picker_options, opts)
+				return {
+					find = function()
+						assert(opts.attach_mappings(1, function() end))
+					end,
+				}
+			end,
+		},
+		finders = { new_table = function(_) return {} end },
+		conf = { generic_sorter = function(_) return {} end },
+		actions = { close = function() end },
+		state = { get_selected_entry = function() return nil end },
+	}
+	catalog.request = function(_, _, opts, callback)
+		table.insert(requests, opts.query or "")
+		callback({ items = {}, next_cursor = nil }, nil)
+	end
+	pickers._telescope = function() return fake end
+
+	pickers.catalog("relations", { scope = { schema = nil, all_schemas = true } })
+	picker_options[1].on_input_filter_cb("orders")
+	vim.wait(500, function() return #requests == 2 end)
+
+	pickers._telescope = original_telescope
+	catalog.request = original_request
+	eq(requests, { "", "orders" })
+end
+
+T["hands a selected object to its catalog action"] = function()
+	connect()
+	local backend = assert(context.backend(context.snapshot(0)))
 	local dbsh = require("dbsh")
 	local original_query = dbsh.query
 	local asked
 	dbsh.query = function(sql) asked = sql end
 
-	pickers.select(backend, 3, {}, { schema = "public", name = "users" })
+	backend.catalogs[1].on_select({ schema = "public", name = "users" }, context.snapshot(0))
 
 	dbsh.query = original_query
 	expect_match(asked, "public")
+end
+
+T["opens a structural catalog object in its definition buffer"] = function()
+	connect()
+	local catalog = require("dbsh.catalog")
+	local definitions = require("dbsh.definitions")
+	local original_request, original_open, original_telescope, original_select =
+		catalog.request, definitions.open, pickers._telescope, vim.ui.select
+	local opened
+	catalog.request = function(_, _, _, callback)
+		callback({
+			items = {
+				{
+					value = { kind = "index", oid = "99", schema = "public", name = "users_pkey" },
+					display = "public.users_pkey  [index]",
+					ordinal = "public users_pkey index",
+				},
+			},
+			next_cursor = nil,
+		}, nil)
+	end
+	definitions.open = function(snapshot, object)
+		opened = { snapshot = snapshot, object = object }
+		return {}
+	end
+	pickers._telescope = function() return nil end
+	vim.ui.select = function(items, _, callback) callback(items[1]) end
+
+	pickers.catalog("indexes", { scope = { schema = "public", all_schemas = false } })
+
+	vim.ui.select = original_select
+	pickers._telescope = original_telescope
+	definitions.open = original_open
+	catalog.request = original_request
+	eq(opened.object.oid, "99")
+	eq(opened.object.kind, "index")
+end
+
+T["opens the selected scratchpad from the catalog picker"] = function()
+	connect()
+	local captured = {}
+	local fake = {
+		pickers = {
+			new = function(_, opts)
+				return {
+					find = function()
+						assert(opts.attach_mappings(1, function(mode, key, handler)
+							captured.maps = captured.maps or {}
+							captured.maps[mode .. "|" .. key] = handler
+						end))
+					end,
+				}
+			end,
+		},
+		finders = {
+			new_table = function(opts)
+				captured.results = opts.results
+				return {}
+			end,
+		},
+		conf = { generic_sorter = function(_) return {} end },
+		actions = { close = function() end },
+		state = {
+			get_selected_entry = function()
+				return { value = captured.results[2] }
+			end,
+		},
+	}
+	local opened
+	local original_telescope, original_list, original_open = pickers._telescope, scratch.list, scratch.open
+	pickers._telescope = function() return fake end
+	scratch.list = function()
+		return {
+			{
+				id = "monthly",
+				metadata = {
+					name = "Monthly",
+					backend = "postgres",
+					connection_name = "local_db",
+					levels = { database = "postgres" },
+				},
+			},
+		}
+	end
+	scratch.open = function(id) opened = id end
+
+	pickers.scratchpads()
+	captured.maps["i|<CR>"]()
+
+	scratch.open = original_open
+	scratch.list = original_list
+	pickers._telescope = original_telescope
+	eq(captured.results[1].kind, "new")
+	eq(opened, "monthly")
+end
+
+T["creates a scratchpad only after the mandatory project-root prompt"] = function()
+	connect()
+	local original_select, original_input = vim.ui.select, vim.ui.input
+	local original_create, original_open = scratch.create, scratch.open
+	local prompts, created, opened = {}, nil, nil
+	local choices = {
+		"local_db",
+		{ kind = "current" },
+	}
+	vim.ui.select = function(_, opts, callback)
+		table.insert(prompts, opts.prompt)
+		callback(table.remove(choices, 1))
+	end
+	vim.ui.input = function(opts, callback)
+		eq(opts.prompt, "dbsh scratchpad name: ")
+		callback("Reconciliation")
+	end
+	scratch.create = function(value)
+		created = value
+		return vim.tbl_extend("force", { id = "created" }, value)
+	end
+	scratch.open = function(id) opened = id end
+
+	pickers.new_scratchpad()
+
+	scratch.open = original_open
+	scratch.create = original_create
+	vim.ui.input = original_input
+	vim.ui.select = original_select
+	eq(prompts, { "dbsh scratchpad connection: ", "dbsh scratchpad project root: " })
+	eq(created.name, "Reconciliation")
+	eq(created.connection_name, "local_db")
+	eq(created.backend, "postgres")
+	eq(created.levels, { database = "postgres" })
+	eq(created.project_root, vim.fn.getcwd())
+	eq(opened, "created")
+end
+
+T["stops scratchpad creation when any prompt is cancelled"] = function()
+	connect()
+	local original_select, original_input = vim.ui.select, vim.ui.input
+	local original_create = scratch.create
+	local scenarios = {
+		{ selects = { nil } },
+		{ selects = { "local_db", nil } },
+		{ selects = { "local_db", { kind = "choose" } }, inputs = { nil } },
+		{ selects = { "local_db", { kind = "standalone" } }, inputs = { nil } },
+	}
+
+	for _, scenario in ipairs(scenarios) do
+		local selects = vim.deepcopy(scenario.selects)
+		local inputs = vim.deepcopy(scenario.inputs or {})
+		local creates = 0
+		vim.ui.select = function(_, _, callback) callback(table.remove(selects, 1)) end
+		vim.ui.input = function(_, callback) callback(table.remove(inputs, 1)) end
+		scratch.create = function()
+			creates = creates + 1
+		end
+
+		pickers.new_scratchpad()
+		eq(creates, 0)
+	end
+
+	scratch.create = original_create
+	vim.ui.input = original_input
+	vim.ui.select = original_select
+end
+
+T["falls back to vim.ui.select when Telescope is unavailable for scratchpads"] = function()
+	local original_telescope, original_select = pickers._telescope, vim.ui.select
+	local original_list = scratch.list
+	local asked
+	pickers._telescope = function() return nil end
+	scratch.list = function() return {} end
+	vim.ui.select = function(_, opts, callback)
+		asked = opts
+		callback(nil)
+	end
+
+	local ok = pcall(pickers.scratchpads)
+
+	vim.ui.select = original_select
+	scratch.list = original_list
+	pickers._telescope = original_telescope
+	eq(ok, true)
+	eq(asked.prompt, "dbsh scratchpads: ")
 end
 
 return T

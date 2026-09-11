@@ -2,6 +2,7 @@ local helpers = dofile("tests/helpers.lua")
 local eq, expect_match = helpers.eq, helpers.expect_match
 
 local dbsh = require("dbsh")
+local context = require("dbsh.context")
 local exec = require("dbsh.exec")
 local results = require("dbsh.results")
 local csv = require("dbsh.csv")
@@ -21,10 +22,12 @@ local T = MiniTest.new_set({
 		end,
 		post_case = function()
 			exec.runner = original_runner
-			exec.slots = { user = nil, introspect = nil }
-			local buf = results.find_buf()
-			if buf ~= nil then
-				vim.api.nvim_buf_delete(buf, { force = true })
+			exec.slots = {}
+			for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+				local name = vim.api.nvim_buf_get_name(buf)
+				if vim.api.nvim_buf_is_valid(buf) and vim.startswith(vim.fs.basename(name), "__DBSH__ ") then
+					vim.api.nvim_buf_delete(buf, { force = true })
+				end
 			end
 		end,
 	},
@@ -54,34 +57,102 @@ end
 T["declares every backend-agnostic command"] = function()
 	for _, name in ipairs({
 		"DbConnections", "DbTemp", "DbCancel", "DbToggleResults", "DbInfo",
+		"DbObjects", "DbGlobalConnection", "DbForgetConnection",
+		"DbDefinitions", "DbToggleDefinition", "DbRefreshDefinition", "DbCloseDefinitions",
 	}) do
 		eq(vim.fn.exists(":" .. name), 2)
 	end
 end
 
-T["generates one command per level the backend declares"] = function()
-	for _, name in ipairs({ "DbDatabases", "DbSchemas", "DbTables" }) do
+T["delegates definition commands to their picker and registry"] = function()
+	local pickers = require("dbsh.telescope.pickers")
+	local definitions = require("dbsh.definitions")
+	local original_picker = pickers.definitions
+	local original_toggle, original_refresh, original_close =
+		definitions.toggle, definitions.refresh, definitions.close
+	local calls = {}
+	pickers.definitions = function() table.insert(calls, "picker") end
+	definitions.toggle = function()
+		table.insert(calls, "toggle")
+		return true
+	end
+	definitions.refresh = function()
+		table.insert(calls, "refresh")
+		return true
+	end
+	definitions.close = function()
+		table.insert(calls, "close")
+	end
+
+	vim.cmd("DbDefinitions")
+	vim.cmd("DbToggleDefinition")
+	vim.cmd("DbRefreshDefinition")
+	vim.cmd("DbCloseDefinitions")
+
+	definitions.close = original_close
+	definitions.refresh = original_refresh
+	definitions.toggle = original_toggle
+	pickers.definitions = original_picker
+	eq(calls, { "picker", "toggle", "refresh", "close" })
+end
+
+T["opens the scratchpad catalog from DbTemp"] = function()
+	local pickers = require("dbsh.telescope.pickers")
+	local original = pickers.scratchpads
+	local calls = 0
+	pickers.scratchpads = function() calls = calls + 1 end
+
+	vim.cmd("DbTemp")
+
+	pickers.scratchpads = original
+	eq(calls, 1)
+end
+
+T["declares context and catalog commands from the backend union"] = function()
+	for _, name in ipairs({ "DbDatabases", "DbSchemas", "DbRelations", "DbTables" }) do
 		eq(vim.fn.exists(":" .. name), 2)
 	end
 end
 
-T["drops the catalog commands of a connection with no backend"] = function()
-	local config = require("dbsh.config")
+T["keeps catalog commands declared and dispatches by active backend"] = function()
+	local backends = require("dbsh.backends")
+	local previous = backends.registry.fake
+	backends.registry.fake = {
+		name = "fake",
+		contexts = {},
+		catalogs = {},
+	}
 	dbsh.setup({
 		connections = {
 			local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
-			weird = { type = "oracle", host = "h", port = 1, database = "d", username = "u" },
+			weird = { type = "fake", host = "h", port = 1, database = "d", username = "u" },
 		},
 		default = "local_db",
 	})
-	eq(vim.fn.exists(":DbTables"), 2)
+	local a = vim.api.nvim_create_buf(false, true)
+	local b = vim.api.nvim_create_buf(false, true)
+	assert(context.bind(a, "local_db", "test"))
+	assert(context.bind(b, "weird", "test"))
+	local pickers = require("dbsh.telescope.pickers")
+	local original_catalog, original_notify = pickers.catalog, vim.notify
+	local called, notified
+	pickers.catalog = function(key) called = key end
+	vim.notify = function(message) notified = message end
 
-	config.set_connection("weird")
-	eq(vim.fn.exists(":DbTables"), 0)
+	vim.api.nvim_set_current_buf(a)
+	vim.cmd("DbRelations")
+	vim.api.nvim_set_current_buf(b)
+	vim.cmd("DbRelations")
 
-	-- And they come back when a usable connection does.
-	config.set_connection("local_db")
+	vim.notify = original_notify
+	pickers.catalog = original_catalog
+	backends.registry.fake = previous
 	eq(vim.fn.exists(":DbTables"), 2)
+	eq(called, "relations")
+	expect_match(notified, "not available")
+
+	vim.api.nvim_buf_delete(a, { force = true })
+	vim.api.nvim_buf_delete(b, { force = true })
 end
 
 T["refuses an empty query"] = function()
@@ -93,7 +164,83 @@ T["refuses an empty query"] = function()
 	expect_match(notified, "empty")
 end
 
+T["confirms a mutating query before it resolves and runs"] = function()
+	local original_select = vim.ui.select
+	local captured
+	local ran = false
+	vim.ui.select = function(items, opts, callback)
+		captured = { items = items, opts = opts }
+		callback("Run")
+	end
+	exec.runner = function(_, _, callback)
+		ran = true
+		vim.schedule(function()
+			callback({ code = 0, stdout = "DELETE 1", stderr = "" })
+		end)
+		return { kill = function() end }
+	end
+
+	dbsh.query("DELETE FROM users;")
+	vim.wait(500, function() return ran end)
+
+	vim.ui.select = original_select
+	eq(captured.items, { "Run", "Cancel" })
+	expect_match(captured.opts.prompt, "mutation")
+	eq(ran, true)
+end
+
+T["does not resolve variables or run after confirmation is cancelled"] = function()
+	local resolve = require("dbsh.resolve")
+	local original_preamble, original_select = resolve.preamble, vim.ui.select
+	local preambles, ran = 0, false
+	resolve.preamble = function()
+		preambles = preambles + 1
+	end
+	vim.ui.select = function(_, _, callback) callback("Cancel") end
+	exec.runner = function()
+		ran = true
+		return { kill = function() end }
+	end
+
+	dbsh.query("DELETE FROM :raw_data;")
+	vim.wait(100, function() return ran end)
+
+	vim.ui.select = original_select
+	resolve.preamble = original_preamble
+	eq(preambles, 0)
+	eq(ran, false)
+end
+
+T["runs directly when safety is off"] = function()
+	dbsh.setup({
+		connections = {
+			local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
+		},
+		default = "local_db",
+		safety = { mode = "off" },
+	})
+	local original_select = vim.ui.select
+	local ran = false
+	vim.ui.select = function()
+		error("safety off must not prompt")
+	end
+	exec.runner = function(_, _, callback)
+		ran = true
+		vim.schedule(function()
+			callback({ code = 0, stdout = "DELETE 1", stderr = "" })
+		end)
+		return { kill = function() end }
+	end
+
+	dbsh.query("DELETE FROM users;")
+	vim.wait(500, function() return ran end)
+
+	vim.ui.select = original_select
+	eq(ran, true)
+end
+
 T["renders successful output in the result buffer"] = function()
+	local snapshot = context.snapshot(0)
 	exec.runner = function(_, _, on_exit)
 		vim.schedule(function()
 			on_exit({ code = 0, stdout = "one\ntwo", stderr = "" })
@@ -105,7 +252,7 @@ T["renders successful output in the result buffer"] = function()
 
 	local buf
 	vim.wait(1000, function()
-		buf = results.find_buf()
+		buf = results.find_buf(snapshot)
 		if buf == nil then
 			return false
 		end
@@ -117,6 +264,7 @@ T["renders successful output in the result buffer"] = function()
 end
 
 T["renders stderr when psql fails"] = function()
+	local snapshot = context.snapshot(0)
 	exec.runner = function(_, _, on_exit)
 		vim.schedule(function()
 			on_exit({ code = 2, stdout = "", stderr = "connection refused" })
@@ -128,7 +276,7 @@ T["renders stderr when psql fails"] = function()
 
 	local buf
 	vim.wait(1000, function()
-		buf = results.find_buf()
+		buf = results.find_buf(snapshot)
 		if buf == nil then
 			return false
 		end
@@ -239,9 +387,10 @@ T["exports the given range rather than the paragraph"] = function()
 end
 
 T["sends the preamble to psql but renders only the query"] = function()
+	local snapshot = context.snapshot(0)
 	local resolve = require("dbsh.resolve")
 	local original_preamble = resolve.preamble
-	resolve.preamble = function(_, cb) cb("\\set raw_data 'public.events'\n") end
+	resolve.preamble = function(_, _, cb) cb("\\set raw_data 'public.events'\n") end
 
 	local script
 	exec.runner = function(argv, _, on_exit)
@@ -261,7 +410,7 @@ T["sends the preamble to psql but renders only the query"] = function()
 
 	local buf
 	vim.wait(1000, function()
-		buf = results.find_buf()
+		buf = results.find_buf(snapshot)
 		return buf ~= nil and vim.api.nvim_buf_get_lines(buf, 0, 1, true)[1] == "SELECT * FROM :raw_data;"
 	end)
 	resolve.preamble = original_preamble
@@ -276,7 +425,7 @@ end
 T["runs nothing when the variable prompt is cancelled"] = function()
 	local resolve = require("dbsh.resolve")
 	local original_preamble = resolve.preamble
-	resolve.preamble = function(_, cb) cb(nil) end
+	resolve.preamble = function(_, _, cb) cb(nil) end
 
 	local ran = false
 	exec.runner = function(_, _, _)
@@ -297,7 +446,7 @@ T["hands the preamble to the csv export"] = function()
 	local original_preamble, original_run = resolve.preamble, export.run
 	local original_input, original_notify = vim.ui.input, vim.notify
 
-	resolve.preamble = function(_, cb) cb("\\set raw_data 'public.events'\n") end
+	resolve.preamble = function(_, _, cb) cb("\\set raw_data 'public.events'\n") end
 	vim.ui.input = function(_, cb) cb("/tmp/psql-variables-test.csv") end
 	vim.notify = function() end
 
@@ -323,10 +472,10 @@ end
 
 T["refreshes the schema cache after a successful query"] = function()
 	local lsp = require("dbsh.lsp")
-	local original = lsp.invalidate
-	local calls = 0
-	lsp.invalidate = function()
-		calls = calls + 1
+	local original = lsp.invalidate_external
+	local snapshot
+	lsp.invalidate_external = function(value)
+		snapshot = value
 	end
 
 	exec.runner = function(_, _, on_exit)
@@ -338,18 +487,25 @@ T["refreshes the schema cache after a successful query"] = function()
 
 	dbsh.query("SELECT 1;")
 	vim.wait(1000, function()
-		return calls > 0
+		return snapshot ~= nil
 	end)
 
-	lsp.invalidate = original
-	eq(calls, 1)
+	lsp.invalidate_external = original
+	eq(snapshot.id, context.snapshot(0).id)
 end
 
 T["does not refresh the schema cache when the query fails"] = function()
+	dbsh.setup({
+		connections = {
+			local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
+		},
+		default = "local_db",
+		safety = { mode = "off" },
+	})
 	local lsp = require("dbsh.lsp")
-	local original = lsp.invalidate
+	local original = lsp.invalidate_external
 	local calls = 0
-	lsp.invalidate = function()
+	lsp.invalidate_external = function()
 		calls = calls + 1
 	end
 
@@ -365,8 +521,92 @@ T["does not refresh the schema cache when the query fails"] = function()
 		return calls > 0
 	end)
 
-	lsp.invalidate = original
+	lsp.invalidate_external = original
 	eq(calls, 0)
+end
+
+T["keeps queries, results, and last-query state independent by context"] = function()
+	dbsh.setup({
+		connections = {
+			local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
+			staging = { host = "db.example.com", port = 5432, database = "app", username = "readonly" },
+		},
+		default = "local_db",
+	})
+	local a = vim.api.nvim_create_buf(false, true)
+	local b = vim.api.nvim_create_buf(false, true)
+	assert(context.bind(a, "local_db", "test"))
+	assert(context.bind(b, "staging", "test"))
+	local snapshot_a, snapshot_b = context.snapshot(a), context.snapshot(b)
+
+	local callbacks = {}
+	exec.runner = function(_, _, callback)
+		table.insert(callbacks, callback)
+		return { kill = function() end }
+	end
+
+	vim.api.nvim_set_current_buf(a)
+	dbsh.query("SELECT 'a';")
+	vim.api.nvim_set_current_buf(b)
+	dbsh.query("SELECT 'b';")
+	callbacks[1]({ code = 0, stdout = "a", stderr = "" })
+	callbacks[2]({ code = 0, stdout = "b", stderr = "" })
+
+	vim.wait(500, function()
+		local a_buf = results.find_buf(snapshot_a)
+		local b_buf = results.find_buf(snapshot_b)
+		return a_buf ~= nil
+			and b_buf ~= nil
+			and vim.api.nvim_buf_get_lines(a_buf, 0, 1, true)[1] == "SELECT 'a';"
+			and vim.api.nvim_buf_get_lines(b_buf, 0, 1, true)[1] == "SELECT 'b';"
+	end)
+	eq(vim.api.nvim_buf_get_lines(results.find_buf(snapshot_a), 0, -1, true), {
+		"SELECT 'a';", "", "a",
+	})
+	eq(vim.api.nvim_buf_get_lines(results.find_buf(snapshot_b), 0, -1, true), {
+		"SELECT 'b';", "", "b",
+	})
+	eq(dbsh.last_query(a), "SELECT 'a';")
+	eq(dbsh.last_query(b), "SELECT 'b';")
+end
+
+T["DbToggleResults and DbCancel affect only the active context"] = function()
+	dbsh.setup({
+		connections = {
+			local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
+			staging = { host = "db.example.com", port = 5432, database = "app", username = "readonly" },
+		},
+		default = "local_db",
+	})
+	local a = vim.api.nvim_create_buf(false, true)
+	local b = vim.api.nvim_create_buf(false, true)
+	assert(context.bind(a, "local_db", "test"))
+	assert(context.bind(b, "staging", "test"))
+	local snapshot_a, snapshot_b = context.snapshot(a), context.snapshot(b)
+
+	local handles = {}
+	exec.runner = function(_, _, _)
+		local handle = {
+			killed = false,
+			kill = function(self) self.killed = true end,
+		}
+		table.insert(handles, handle)
+		return handle
+	end
+	exec.run("SELECT 1;", { context = snapshot_a }, function() end)
+	exec.run("SELECT 2;", { context = snapshot_b }, function() end)
+
+	results.render(snapshot_a, "SELECT 1;", "a")
+	results.render(snapshot_b, "SELECT 2;", "b")
+	results.close(snapshot_a)
+	vim.api.nvim_set_current_buf(a)
+	vim.cmd("DbToggleResults")
+	vim.cmd("DbCancel")
+
+	eq(results.find_win(results.find_buf(snapshot_a)) ~= nil, true)
+	eq(results.find_win(results.find_buf(snapshot_b)) ~= nil, true)
+	eq(handles[1].killed, true)
+	eq(handles[2].killed, false)
 end
 
 return T
