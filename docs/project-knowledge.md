@@ -46,6 +46,11 @@ un buffer de définition crée un split au lieu de remplacer le DDL visible.
 `exec.lua` possède des slots par session : `user`, `introspect` et `definition`.
 `run` écrit un script SQL temporaire ; `run_argv` exécute un argv fourni par un
 backend, sans script temporaire ni journalisation des arguments/environnements.
+Un backend peut préparer un runtime privé asynchrone. Pour Snowflake, ce runtime
+contient seulement un mot de passe en mémoire provenant d’un `password_command`
+argv, mis dans `SNOWFLAKE_PASSWORD` pour le processus `snow` enfant. Les secrets
+ne doivent jamais rejoindre le contexte public, les clés de catalogue, les
+buffers de résultat, les erreurs ou la persistance.
 
 `safety.lua` est pur et ne dépend pas de l’UI. Son classifieur est volontairement
 conservateur : lectures connues exécutées directement, mutations/privilèges,
@@ -116,3 +121,20 @@ d’abord cette évolution PgLS, puis dbsh. Un binaire local patché via
 dans une configuration partagée.
 
 Les commits suivent Conventional Commits, en anglais.
+
+## Snowflake
+
+Le backend Snowflake utilise exclusivement `snow sql` avec une connexion
+temporaire structurée. Les profils ne contiennent ni JDBC URL ni mot de passe
+littéral. Les flags de rôle, warehouse, base et schéma représentent le contexte
+effectif ; un `USE` saisi dans le SQL ne modifie pas le contexte dbsh.
+
+Les catalogues Snowflake utilisent `JSON_EXT`. Les requêtes à plusieurs
+instructions, notamment `SHOW` suivi de `RESULT_SCAN`, retournent plusieurs
+jeux de résultats : le parseur utilise le dernier, qui porte la sélection,
+le filtre et la pagination. Les catégories avec un schéma utilisent le scope
+générique ; les catégories compte n’en demandent pas.
+
+Le cache de credentials est en mémoire, expire par TTL, est invalidé après une
+erreur d’authentification reconnue et est vidé à la sortie de Neovim. Les
+permissions Snowflake restent la frontière de sécurité.
