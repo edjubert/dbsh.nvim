@@ -132,6 +132,31 @@ T["rejects a connection whose type has no backend"] = function()
 	expect_match(err, "unknown connection type")
 end
 
+T["validates Snowflake profiles without exposing profile values"] = function()
+	config.setup({
+		connections = {
+			snow = {
+				type = "snowflake",
+				host = "account.example.test",
+				port = 443,
+				username = "analyst",
+				authenticator = "https://sso.example.test",
+				role = "ANALYST",
+				warehouse = "COMPUTE",
+				database = "ANALYTICS",
+				password_command = { "password-command", "--profile", "analytics" },
+				password = "fake-password",
+			},
+		},
+		default = "snow",
+	})
+
+	local connection, err = config.connection("snow")
+	eq(connection, nil)
+	expect_match(err, "must not provide a password")
+	eq(err:find("fake-password", 1, true), nil)
+end
+
 T["reports no connection when resolving a backend"] = function()
 	local backend, err = config.backend_for(nil)
 	eq(backend, nil)

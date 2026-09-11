@@ -162,7 +162,7 @@ T["enumerates registered backends in deterministic name order"] = function()
 	local names = vim.tbl_map(function(backend) return backend.name end, backends.all())
 
 	backends.registry.test_catalog = original
-	eq(names, { "postgres", "test_catalog" })
+	eq(names, { "postgres", "snowflake", "test_catalog" })
 end
 
 local original_runner

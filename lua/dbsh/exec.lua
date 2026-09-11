@@ -4,6 +4,7 @@
 
 local config = require("dbsh.config")
 local context = require("dbsh.context")
+local credentials = require("dbsh.credentials")
 
 local M = {}
 
@@ -93,7 +94,17 @@ function M.run(sql, opts, callback)
 	local mode = opts.mode or "pretty"
 	local slots = slots_for(snapshot, true)
 	local operation = {}
+	local retry_count = 0
 	slots[slot] = operation
+
+	local function is_active()
+		local current_slots = slots_for(snapshot, false)
+		if current_slots == nil then
+			return false
+		end
+		local active = current_slots[slot]
+		return active == operation or active == operation.handle
+	end
 
 	local function discard_operation()
 		local current_slots = slots_for(snapshot, false)
@@ -109,17 +120,35 @@ function M.run(sql, opts, callback)
 		return true
 	end
 
+	local prepare_then_execute
+
+	local function should_retry(obj, runtime)
+		if retry_count ~= 0
+			or type(backend.is_authentication_error) ~= "function"
+			or type(runtime) ~= "table"
+			or runtime.credential_backed ~= true
+			or type(runtime.credential_key) ~= "string"
+			or runtime.credential_key == ""
+			or obj.code == 0 then
+			return false
+		end
+		local ok, is_authentication_error = pcall(
+			backend.is_authentication_error,
+			obj.stderr or "",
+			obj.stdout or ""
+		)
+		return ok and is_authentication_error == true
+	end
+
 	local function execute(runtime)
 		if not context.is_current(snapshot) then
 			discard_operation()
 			return nil
 		end
-		if not discard_operation() then
+		if not is_active() then
 			return nil
 		end
 
-		slots = slots_for(snapshot, true)
-		slots[slot] = operation
 		local tmpfile = M.write_script(backend, sql, mode)
 		local handle = M.runner(
 			backend.argv(snapshot.connection, tmpfile, mode, runtime),
@@ -130,10 +159,23 @@ function M.run(sql, opts, callback)
 			},
 			vim.schedule_wrap(function(obj)
 				os.remove(tmpfile)
-				if not discard_operation() then
+				if not is_active() then
 					return
 				end
 				if not context.is_current(snapshot) then
+					discard_operation()
+					return
+				end
+				if should_retry(obj, runtime) then
+					retry_count = retry_count + 1
+					credentials.invalidate(runtime.credential_key)
+					slots = slots_for(snapshot, true)
+					slots[slot] = operation
+					operation.handle = nil
+					prepare_then_execute()
+					return
+				end
+				if not discard_operation() then
 					return
 				end
 				callback(obj.code, obj.stdout or "", obj.stderr or "")
@@ -147,20 +189,28 @@ function M.run(sql, opts, callback)
 		return handle
 	end
 
-	local function prepared(runtime, prepare_err)
-		if prepare_err ~= nil or type(runtime) ~= "table" then
-			if discard_operation() then
-				callback(1, "", "dbsh.nvim: backend preparation failed")
+	prepare_then_execute = function()
+		local prepared_once = false
+		local function prepared(runtime, prepare_err)
+			if prepared_once then
+				return nil
 			end
-			return nil
+			prepared_once = true
+			if prepare_err ~= nil or type(runtime) ~= "table" then
+				if discard_operation() then
+					callback(1, "", "dbsh.nvim: backend preparation failed")
+				end
+				return nil
+			end
+			return execute(runtime)
 		end
-		return execute(runtime)
+		if type(backend.prepare) == "function" then
+			return backend.prepare(snapshot, config.options(), prepared)
+		end
+		return prepared({})
 	end
 
-	if type(backend.prepare) == "function" then
-		return backend.prepare(snapshot, config.options(), prepared)
-	end
-	return execute({})
+	return prepare_then_execute()
 end
 
 -- Runs a backend-provided command (for example pg_dump) without materialising
