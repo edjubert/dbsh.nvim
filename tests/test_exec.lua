@@ -23,10 +23,18 @@ local T = MiniTest.new_set({
 		end,
 		post_case = function()
 			exec.runner = original_runner
-			exec.slots = { user = nil, introspect = nil }
+			exec.slots = {}
 		end,
 	},
 })
+
+local function two_snapshots()
+	local a = vim.api.nvim_create_buf(false, true)
+	local b = vim.api.nvim_create_buf(false, true)
+	assert(context.bind(a, "local_db", "test"))
+	assert(context.bind(b, "staging", "test"))
+	return a, b, context.snapshot(a), context.snapshot(b)
+end
 
 T["passes PGCONNECT_TIMEOUT and never PGPASSWORD"] = function()
 	local captured_opts
@@ -59,6 +67,76 @@ T["delivers the result when the captured context is unchanged"] = function()
 	eq(got.stdout, "ok")
 end
 
+T["keeps cancellation and completion local to each context session"] = function()
+	local callbacks, handles = {}, {}
+	exec.runner = function(_, _, cb)
+		local handle = {
+			killed = false,
+			kill = function(self) self.killed = true end,
+		}
+		table.insert(callbacks, cb)
+		table.insert(handles, handle)
+		return handle
+	end
+
+	local a, b, snapshot_a, snapshot_b = two_snapshots()
+	local delivered = {}
+
+	exec.run("SELECT 'a1';", { context = snapshot_a }, function()
+		table.insert(delivered, "a1")
+	end)
+	exec.run("SELECT 'b';", { context = snapshot_b }, function()
+		table.insert(delivered, "b")
+	end)
+	eq(handles[1].killed, false)
+	eq(handles[2].killed, false)
+
+	exec.run("SELECT 'a2';", { context = snapshot_a }, function()
+		table.insert(delivered, "a2")
+	end)
+	eq(handles[1].killed, true)
+	eq(handles[2].killed, false)
+	eq(exec.slots[snapshot_a.id].user, handles[3])
+	eq(exec.slots[snapshot_b.id].user, handles[2])
+
+	callbacks[1]({ code = 0, stdout = "obsolete", stderr = "" })
+	callbacks[2]({ code = 0, stdout = "b", stderr = "" })
+	callbacks[3]({ code = 0, stdout = "a2", stderr = "" })
+	vim.wait(200, function() return #delivered == 2 end)
+
+	eq(delivered, { "b", "a2" })
+	eq(exec.slots[snapshot_a.id], nil)
+	eq(exec.slots[snapshot_b.id], nil)
+
+	vim.api.nvim_buf_delete(a, { force = true })
+	vim.api.nvim_buf_delete(b, { force = true })
+end
+
+T["cancels only the selected context session"] = function()
+	local handles = {}
+	exec.runner = function(_, _, _)
+		local handle = {
+			killed = false,
+			kill = function(self) self.killed = true end,
+		}
+		table.insert(handles, handle)
+		return handle
+	end
+
+	local a, b, snapshot_a, snapshot_b = two_snapshots()
+	exec.run("SELECT 1;", { context = snapshot_a }, function() end)
+	exec.run("SELECT 2;", { context = snapshot_b }, function() end)
+	exec.cancel("user", snapshot_a)
+
+	eq(handles[1].killed, true)
+	eq(handles[2].killed, false)
+	eq(exec.slots[snapshot_a.id], nil)
+	eq(exec.slots[snapshot_b.id].user, handles[2])
+
+	vim.api.nvim_buf_delete(a, { force = true })
+	vim.api.nvim_buf_delete(b, { force = true })
+end
+
 T["drops only results whose originating buffer context changed"] = function()
 	local exits = {}
 	exec.runner = function(_, _, cb)
@@ -66,13 +144,9 @@ T["drops only results whose originating buffer context changed"] = function()
 		return { kill = function() end }
 	end
 
-	local a = vim.api.nvim_create_buf(false, true)
-	local b = vim.api.nvim_create_buf(false, true)
-	assert(context.bind(a, "local_db", "test"))
-	assert(context.bind(b, "staging", "test"))
-
+	local a, b, snapshot_a = two_snapshots()
 	local delivered_from_a = false
-	exec.run("SELECT 1;", { context = context.snapshot(a) }, function()
+	exec.run("SELECT 1;", { context = snapshot_a }, function()
 		delivered_from_a = true
 	end)
 	assert(context.set_level(b, "database", "other", "test"))
@@ -106,7 +180,7 @@ T["reports an error when there is no effective connection"] = function()
 	expect_match(stderr, "no current connection")
 end
 
-T["cancels the previous query in the same slot only"] = function()
+T["keeps user and introspection slots separate in one session"] = function()
 	local killed = {}
 	exec.runner = function(argv, _, _)
 		local id = argv[#argv]

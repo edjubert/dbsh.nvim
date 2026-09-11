@@ -12,10 +12,21 @@ local lsp = require("dbsh.lsp")
 
 local M = {}
 
-local last_query = nil
+local last_queries = {}
 
-function M.last_query()
-	return last_query
+local function active_snapshot()
+	return results.context_snapshot(0) or context.snapshot(0)
+end
+
+function M.last_query(bufnr_or_snapshot)
+	local snapshot
+	if type(bufnr_or_snapshot) == "table" then
+		snapshot = bufnr_or_snapshot
+	else
+		snapshot = results.context_snapshot(bufnr_or_snapshot or 0)
+			or context.snapshot(bufnr_or_snapshot or 0)
+	end
+	return last_queries[snapshot.id]
 end
 
 function M.query(sql)
@@ -26,20 +37,20 @@ function M.query(sql)
 	end
 
 	local snapshot = context.snapshot(0)
-	last_query = sql
+	last_queries[snapshot.id] = sql
 	resolve.preamble(sql, snapshot, function(preamble)
 		if preamble == nil then
 			return
 		end
 
 		local split_opts = { split = config.options().results_split }
-		results.running(sql, split_opts)
+		results.running(snapshot, sql, split_opts)
 		exec.run(preamble .. sql, { context = snapshot }, function(code, stdout, stderr)
 			local output = stdout
 			if code ~= 0 then
 				output = stderr ~= "" and stderr or stdout
 			end
-			results.render(sql, output, split_opts)
+			results.render(snapshot, sql, output, split_opts)
 			if code == 0 then
 				lsp.invalidate_external(snapshot)
 			end
@@ -138,9 +149,9 @@ function M.yank_csv()
 end
 
 local function query_to_export(opts)
-	local name = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ":t")
-	if name == "__DBSH__" then
-		return M.last_query()
+	local result_snapshot = results.context_snapshot(0)
+	if result_snapshot ~= nil then
+		return M.last_query(result_snapshot), result_snapshot
 	end
 
 	local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
@@ -150,17 +161,17 @@ local function query_to_export(opts)
 	else
 		start, stop = M.paragraph_range(lines, vim.api.nvim_win_get_cursor(0)[1])
 	end
-	return table.concat(vim.list_slice(lines, start, stop), "\n")
+	return table.concat(vim.list_slice(lines, start, stop), "\n"), context.snapshot(0)
 end
 
 function M.export_csv(opts)
-	local sql = vim.trim(query_to_export(opts) or "")
+	local sql, snapshot = query_to_export(opts)
+	sql = vim.trim(sql or "")
 	if sql == "" then
 		vim.notify("dbsh.nvim: nothing to export", vim.log.levels.WARN)
 		return
 	end
 
-	local snapshot = context.snapshot(0)
 	resolve.preamble(sql, snapshot, function(preamble)
 		if preamble == nil then
 			return
@@ -224,9 +235,9 @@ local function declare_commands()
 
 	command("DbConnections", function() pickers().connections() end, {})
 	command("DbTemp", function() scratch.open() end, {})
-	command("DbCancel", function() exec.cancel("user") end, {})
+	command("DbCancel", function() exec.cancel("user", active_snapshot()) end, {})
 	command("DbToggleResults", function()
-		local ok = results.toggle({ split = config.options().results_split })
+		local ok = results.toggle(active_snapshot(), { split = config.options().results_split })
 		if not ok then
 			vim.notify("dbsh.nvim: no result yet", vim.log.levels.WARN)
 		end
@@ -254,6 +265,7 @@ end
 function M.setup(opts)
 	config.setup(opts)
 	context.setup()
+	last_queries = {}
 	declare_commands()
 
 	local group = vim.api.nvim_create_augroup("dbsh", { clear = true })
