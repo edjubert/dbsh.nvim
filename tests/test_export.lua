@@ -3,8 +3,10 @@ local eq, expect_match = helpers.eq, helpers.expect_match
 
 local config = require("dbsh.config")
 local context = require("dbsh.context")
+local dbsh = require("dbsh")
 local exec = require("dbsh.exec")
 local export = require("dbsh.export")
+local results = require("dbsh.results")
 
 local original_runner
 local tmpdir
@@ -35,7 +37,13 @@ local T = MiniTest.new_set({
 		end,
 		post_case = function()
 			exec.runner = original_runner
-			exec.slots = { user = nil, introspect = nil }
+			exec.slots = {}
+			for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+				local name = vim.api.nvim_buf_get_name(buf)
+				if vim.api.nvim_buf_is_valid(buf) and vim.startswith(vim.fs.basename(name), "__DBSH__ ") then
+					vim.api.nvim_buf_delete(buf, { force = true })
+				end
+			end
 			vim.fn.delete(tmpdir, "rf")
 		end,
 	},
@@ -136,6 +144,50 @@ T["reports an unresolvable backend without running anything"] = function()
 	export.run("SELECT 1;", vim.fs.joinpath(tmpdir, "out.csv"), nil, function(_, e) err = e end)
 	vim.wait(500, function() return err ~= nil end)
 	expect_match(err, "unknown connection type")
+end
+
+T["exports the query belonging to the displayed result session"] = function()
+	dbsh.setup({
+		connections = {
+			local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
+			staging = { host = "db.example.com", port = 5432, database = "app", username = "readonly" },
+		},
+		default = "local_db",
+	})
+	local a = vim.api.nvim_create_buf(false, true)
+	local b = vim.api.nvim_create_buf(false, true)
+	assert(context.bind(a, "local_db", "test"))
+	assert(context.bind(b, "staging", "test"))
+	local snapshot_b = context.snapshot(b)
+
+	local callbacks = {}
+	exec.runner = function(_, _, callback)
+		table.insert(callbacks, callback)
+		return { kill = function() end }
+	end
+	vim.api.nvim_set_current_buf(a)
+	dbsh.query("SELECT 'a';")
+	vim.api.nvim_set_current_buf(b)
+	dbsh.query("SELECT 'b';")
+	callbacks[1]({ code = 0, stdout = "a", stderr = "" })
+	callbacks[2]({ code = 0, stdout = "b", stderr = "" })
+	vim.wait(500, function() return results.find_buf(snapshot_b) ~= nil end)
+
+	local original_run, original_input = export.run, vim.ui.input
+	local captured
+	export.run = function(sql, _, _, callback, snapshot)
+		captured = { sql = sql, snapshot = snapshot }
+		callback(vim.fs.joinpath(tmpdir, "out.csv"), nil)
+	end
+	vim.ui.input = function(_, callback) callback(vim.fs.joinpath(tmpdir, "out.csv")) end
+
+	vim.api.nvim_set_current_buf(assert(results.find_buf(snapshot_b)))
+	dbsh.export_csv({ range = 0 })
+
+	vim.ui.input = original_input
+	export.run = original_run
+	eq(captured.sql, "SELECT 'b';")
+	eq(captured.snapshot.id, snapshot_b.id)
 end
 
 return T

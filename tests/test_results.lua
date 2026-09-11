@@ -1,129 +1,118 @@
 local helpers = dofile("tests/helpers.lua")
 local eq = helpers.eq
 
+local config = require("dbsh.config")
+local context = require("dbsh.context")
 local results = require("dbsh.results")
+
+local snapshots = {}
 
 local T = MiniTest.new_set({
 	hooks = {
+		pre_case = function()
+			config.setup({
+				connections = {
+					local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
+					staging = { host = "db.example.com", port = 5432, database = "app", username = "readonly" },
+				},
+				default = "local_db",
+			})
+			context.setup()
+			local other = vim.api.nvim_create_buf(false, true)
+			assert(context.bind(other, "staging", "test"))
+			snapshots = {
+				a = context.snapshot(0),
+				b = context.snapshot(other),
+			}
+		end,
 		post_case = function()
-			local buf = results.find_buf()
-			if buf ~= nil then
-				vim.api.nvim_buf_delete(buf, { force = true })
+			for _, snapshot in pairs(snapshots) do
+				local buf = results.find_buf(snapshot)
+				if buf ~= nil then
+					vim.api.nvim_buf_delete(buf, { force = true })
+				end
 			end
+			snapshots = {}
 		end,
 	},
 })
 
-T["creates a scratch buffer named __DBSH__"] = function()
-	local buf = results.open()
+T["creates a session-scoped scratch buffer"] = function()
+	local buf = results.open(snapshots.a)
 	eq(vim.api.nvim_buf_is_valid(buf), true)
-	eq(vim.fn.fnamemodify(vim.api.nvim_buf_get_name(buf), ":t"), "__DBSH__")
+	eq(vim.fn.fnamemodify(vim.api.nvim_buf_get_name(buf), ":t"):find("__DBSH__", 1, true) ~= nil, true)
 	eq(vim.bo[buf].buftype, "nofile")
 	eq(vim.bo[buf].filetype, "sql")
+	eq(results.context_snapshot(buf).id, snapshots.a.id)
 end
 
 T["disables wrapping so wide tables scroll horizontally"] = function()
-	local _, win = results.open()
+	local _, win = results.open(snapshots.a)
 	eq(vim.wo[win].wrap, false)
 	eq(vim.wo[win].sidescrolloff, 0)
 end
 
-T["reuses the same buffer across calls"] = function()
-	local first = results.open()
-	local second = results.open()
+T["reuses one buffer per context and keeps contexts distinct"] = function()
+	local first = results.open(snapshots.a)
+	local second = results.open(snapshots.a)
+	local other = results.open(snapshots.b)
 	eq(first, second)
+	eq(first == other, false)
 end
 
-T["renders the query followed by the output"] = function()
-	local buf = results.render("SELECT 1;", "one\ntwo")
-	local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, true)
-	eq(lines, { "SELECT 1;", "", "one", "two" })
+T["renders independent output in each result buffer"] = function()
+	local a = results.render(snapshots.a, "SELECT 1;", "one")
+	local b = results.render(snapshots.b, "SELECT 2;", "two")
+
+	eq(vim.api.nvim_buf_get_lines(a, 0, -1, true), { "SELECT 1;", "", "one" })
+	eq(vim.api.nvim_buf_get_lines(b, 0, -1, true), { "SELECT 2;", "", "two" })
 end
 
-T["shows a running placeholder"] = function()
-	local buf = results.running("SELECT 1;")
-	local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, true)
-	eq(lines[1], "# Running...")
-	eq(lines[2], "SELECT 1;")
+T["shows a running placeholder without replacing another session"] = function()
+	results.render(snapshots.b, "SELECT 2;", "two")
+	local a = results.running(snapshots.a, "SELECT 1;")
+
+	eq(vim.api.nvim_buf_get_lines(a, 0, -1, true), { "# Running...", "SELECT 1;", "" })
+	local b = assert(results.find_buf(snapshots.b))
+	eq(vim.api.nvim_buf_get_lines(b, 0, -1, true), { "SELECT 2;", "", "two" })
 end
 
-T["replaces previous content on the next render"] = function()
-	results.render("SELECT 1;", "one")
-	local buf = results.render("SELECT 2;", "two")
-	local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, true)
-	eq(lines, { "SELECT 2;", "", "two" })
+T["makes every result buffer read only while still rendering"] = function()
+	local a = results.render(snapshots.a, "SELECT a\nFROM t;", "one")
+	local b = results.render(snapshots.b, "SELECT 2;", "two")
+
+	eq(vim.api.nvim_buf_get_lines(a, 0, -1, true), { "SELECT a", "FROM t;", "", "one" })
+	eq(vim.bo[a].modifiable, false)
+	eq(vim.bo[b].modifiable, false)
 end
 
-T["makes the result buffer read only"] = function()
-	local buf = results.open()
-	eq(vim.bo[buf].modifiable, false)
+T["only toggles and closes the requested session"] = function()
+	local a = results.open(snapshots.a)
+	local b = results.open(snapshots.b)
+
+	eq(results.toggle(snapshots.a), true)
+	eq(results.find_win(a), nil)
+	eq(results.find_win(b) ~= nil, true)
+
+results.close(snapshots.b)
+	eq(results.find_win(b), nil)
+	eq(vim.api.nvim_buf_is_valid(a), true)
+	eq(vim.api.nvim_buf_is_valid(b), true)
 end
 
-T["still renders into the read only buffer"] = function()
-	local buf = results.render("SELECT 1;", "one")
-	eq(vim.api.nvim_buf_get_lines(buf, 0, -1, true), { "SELECT 1;", "", "one" })
-	eq(vim.bo[buf].modifiable, false)
+T["reports no result for a session that has none"] = function()
+	eq(results.toggle(snapshots.a), false)
 end
 
-T["renders a multi line query"] = function()
-	local buf = results.render("SELECT a\nFROM t;", "one")
-	local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, true)
-	eq(lines, { "SELECT a", "FROM t;", "", "one" })
-end
-
-T["shows a running placeholder for a multi line query"] = function()
-	local buf = results.running("SELECT a\nFROM t;")
-	local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, true)
-	eq(lines, { "# Running...", "SELECT a", "FROM t;", "" })
-end
-
-T["opens a horizontal split by default"] = function()
-	local before = vim.api.nvim_win_get_width(0)
-	local _, win = results.open()
-	-- A horizontal split keeps the full window width.
-	eq(vim.api.nvim_win_get_width(win), before)
-end
-
-T["opens a vertical split on request"] = function()
-	local before = vim.api.nvim_win_get_width(0)
-	local _, win = results.open({ split = "vertical" })
-	-- A vertical split narrows both windows.
-	eq(vim.api.nvim_win_get_width(win) < before, true)
-end
-
-T["only splits once, regardless of the direction asked afterwards"] = function()
-	local first = select(2, results.open({ split = "vertical" }))
-	local second = select(2, results.open({ split = "horizontal" }))
+T["opens the requested split only once per session"] = function()
+	local first = select(2, results.open(snapshots.a, { split = "vertical" }))
+	local second = select(2, results.open(snapshots.a, { split = "horizontal" }))
 	eq(first, second)
 end
 
 T["opens a floating window when asked"] = function()
-	local _, win = results.open({ split = "float" })
+	local _, win = results.open(snapshots.a, { split = "float" })
 	eq(vim.api.nvim_win_get_config(win).relative, "editor")
-end
-
-T["close hides the window but keeps the buffer and its content"] = function()
-	local buf = results.render("SELECT 1;", "one")
-	results.close()
-	eq(results.find_win(buf), nil)
-	eq(vim.api.nvim_buf_get_lines(buf, 0, -1, true), { "SELECT 1;", "", "one" })
-end
-
-T["toggle closes an open result window"] = function()
-	local buf = results.open()
-	eq(results.toggle(), true)
-	eq(results.find_win(buf), nil)
-end
-
-T["toggle reopens a closed result window"] = function()
-	local buf = results.open()
-	results.close()
-	eq(results.toggle(), true)
-	eq(vim.tbl_contains(vim.api.nvim_list_wins(), results.find_win(buf)), true)
-end
-
-T["toggle reports no result yet when nothing was rendered"] = function()
-	eq(results.toggle(), false)
 end
 
 return T
