@@ -411,4 +411,45 @@ T["contracts"]["previews the selected relation"] = function()
 	eq(asked, 'SELECT * FROM "public"."users" LIMIT 10;')
 end
 
+T["builds faithful definition requests without reading runtime config"] = function()
+	local snapshot = {
+		connection = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
+	}
+	local relation_request = assert(postgres.definition_request(snapshot, {
+		kind = "relation",
+		oid = "42",
+		schema = "public",
+		name = 'we"ird',
+		relkind = "v",
+	}))
+	eq(relation_request.kind, "argv")
+	eq(relation_request.argv[1], "pg_dump")
+	eq(vim.tbl_contains(relation_request.argv, '--table="public"."we""ird"'), true)
+	eq(relation_request.env.PGCONNECT_TIMEOUT, "5")
+	expect_match(relation_request.fallback.sql, "pg_get_viewdef")
+
+	local index_request = assert(postgres.definition_request(snapshot, { kind = "index", oid = "99" }))
+	eq(index_request.kind, "sql")
+	expect_match(index_request.sql, "pg_get_indexdef")
+
+	local constraint_request = assert(postgres.definition_request(snapshot, {
+		kind = "constraint",
+		oid = "100",
+		schema = "public",
+		name = "users_pkey",
+		relation = { schema = "public", name = "users", oid = "42" },
+	}))
+	expect_match(constraint_request.sql, "ALTER TABLE")
+	expect_match(constraint_request.sql, "pg_get_constraintdef")
+
+	local routine_request = assert(postgres.definition_request(snapshot, { kind = "routine", oid = "101" }))
+	expect_match(routine_request.sql, "pg_get_functiondef")
+	local trigger_request = assert(postgres.definition_request(snapshot, { kind = "trigger", oid = "102" }))
+	expect_match(trigger_request.sql, "pg_get_triggerdef")
+
+	local unavailable, err = postgres.definition_request(snapshot, { kind = "policy", name = "tenant" })
+	eq(unavailable, nil)
+	expect_match(err, "not available")
+end
+
 return T

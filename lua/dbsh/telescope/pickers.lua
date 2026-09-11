@@ -396,6 +396,16 @@ function M.objects()
 	end)
 end
 
+function M.definitions()
+	local definitions = require("dbsh.definitions")
+	local snapshot = context.snapshot(0)
+	choose("dbsh definitions", definitions.list(snapshot), function(record)
+		if record ~= nil then
+			definitions.focus(record)
+		end
+	end)
+end
+
 local function choose_scope(snapshot, callback)
 	if snapshot.levels.schema ~= nil then
 		callback({ schema = snapshot.levels.schema, all_schemas = false })
@@ -476,6 +486,12 @@ function M.catalog(key, options)
 					end
 					if definition.on_select ~= nil then
 						definition.on_select(item, snapshot)
+					elseif definition.definition then
+						local object = type(item.value) == "table" and item.value or item
+						local opened, definition_err = require("dbsh.definitions").open(snapshot, object)
+						if opened == nil then
+							notify_error(definition_err)
+						end
 					end
 				end, {
 					on_inspect = definition.inspect and function(item)
@@ -485,6 +501,16 @@ function M.catalog(key, options)
 						local actions = definition.inspect(item, snapshot) or {}
 						choose("dbsh relation inspector", actions, function(action)
 							if action == nil then
+								return
+							end
+							if action.definition then
+								local opened, definition_err = require("dbsh.definitions").open(
+									snapshot,
+									action.object or item
+								)
+								if opened == nil then
+									notify_error(definition_err)
+								end
 								return
 							end
 							if action.action ~= nil then

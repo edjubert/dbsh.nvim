@@ -158,6 +158,102 @@ local function quote_value(value)
 	return quoted_value(value, false)
 end
 
+local function definition_object(object)
+	if type(object) == "table" and type(object.value) == "table" then
+		return object.value
+	end
+	return object
+end
+
+local function oid_literal(value)
+	local oid = tostring(value or "")
+	if oid:match("^%d+$") == nil then
+		return nil
+	end
+	return quote_value(oid) .. "::oid"
+end
+
+local function pg_dump_argv(connection, qualified_name)
+	return {
+		"pg_dump",
+		"-w",
+		"--schema-only",
+		"--no-owner",
+		"--no-privileges",
+		"--table=" .. qualified_name,
+		"-h", connection.host,
+		"-p", tostring(connection.port),
+		"-U", connection.username,
+		"-d", connection.database,
+	}
+end
+
+-- Builds a complete definition request from a catalog identity. It deliberately
+-- does not require config, exec, or the definition registry: callers own
+-- execution and buffer state.
+function M.definition_request(snapshot, object)
+	local connection = snapshot and snapshot.connection
+	if connection == nil then
+		return nil, "definition request requires a connection"
+	end
+	object = definition_object(object)
+	if type(object) ~= "table" then
+		return nil, "definition request requires an object identity"
+	end
+
+	if object.kind == "relation" then
+		if object.schema == nil or object.name == nil then
+			return nil, "definition request requires a qualified relation"
+		end
+		local qualified_name = M.quote_ident(object.schema) .. "." .. M.quote_ident(object.name)
+		local request = {
+			kind = "argv",
+			argv = pg_dump_argv(connection, qualified_name),
+			env = M.env(connection),
+		}
+		if object.relkind == "v" or object.relkind == "m" then
+			local oid = oid_literal(object.oid)
+			if oid ~= nil then
+				request.fallback = {
+					kind = "sql",
+					sql = "SELECT pg_catalog.pg_get_viewdef(" .. oid .. ", true);",
+				}
+			end
+		end
+		return request
+	end
+
+	local oid = oid_literal(object.oid)
+	if oid == nil then
+		return nil, "definition is not available for this object kind"
+	end
+	if object.kind == "index" then
+		return { kind = "sql", sql = "SELECT pg_catalog.pg_get_indexdef(" .. oid .. ");" }
+	end
+	if object.kind == "constraint" then
+		return {
+			kind = "sql",
+			sql = table.concat({
+				"SELECT pg_catalog.format(",
+				"  'ALTER TABLE %I.%I ADD CONSTRAINT %I %s;',",
+				"  n.nspname, c.relname, con.conname, pg_catalog.pg_get_constraintdef(con.oid, true)",
+				")",
+				"FROM pg_catalog.pg_constraint con",
+				"JOIN pg_catalog.pg_class c ON c.oid = con.conrelid",
+				"JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace",
+				"WHERE con.oid = " .. oid .. ";",
+			}, "\n"),
+		}
+	end
+	if object.kind == "routine" then
+		return { kind = "sql", sql = "SELECT pg_catalog.pg_get_functiondef(" .. oid .. ");" }
+	end
+	if object.kind == "trigger" then
+		return { kind = "sql", sql = "SELECT pg_catalog.pg_get_triggerdef(" .. oid .. ", true);" }
+	end
+	return nil, "definition is not available for this object kind"
+end
+
 function M.encode_cursor(sort_values)
 	return vim.json.encode(sort_values)
 end
@@ -589,7 +685,7 @@ local function relation_actions(item)
 		{ title = "Triggers", catalog = "triggers", relation = relation },
 		{ title = "Policies", catalog = "policies", relation = relation },
 		{ title = "Dependencies", inspector = "dependencies", relation = relation },
-		{ title = "Definition", action = M.definition_unavailable, relation = relation },
+		{ title = "Definition", definition = true, object = selected_value(item), relation = relation },
 	}
 end
 
@@ -841,7 +937,8 @@ local function catalog_definition(key, command, title, spec, on_select)
 		command = command,
 		title = title,
 		list = paged_list(spec),
-		on_select = on_select or M.definition_unavailable,
+		on_select = on_select,
+		definition = on_select == nil,
 	}
 end
 
