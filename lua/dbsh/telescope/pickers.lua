@@ -548,6 +548,8 @@ function M.catalog(key, options)
 
 	if options.scope ~= nil then
 		open_scope(options.scope)
+	elseif definition.scope == false then
+		open_scope({ schema = nil, all_schemas = false })
 	else
 		choose_scope(snapshot, open_scope)
 	end

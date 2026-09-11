@@ -1,0 +1,17 @@
+[
+  {
+    "SECOND_COLUMN": 2,
+    "FIRST_COLUMN": "alpha",
+    "NULLABLE_VALUE": null,
+    "DETAILS": {
+      "enabled": true,
+      "tags": ["one", "two"]
+    }
+  },
+  {
+    "SECOND_COLUMN": 3,
+    "FIRST_COLUMN": "beta",
+    "NULLABLE_VALUE": false,
+    "DETAILS": ["next", 7]
+  }
+]

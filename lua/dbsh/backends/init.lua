@@ -7,6 +7,7 @@ M.default = "postgres"
 
 M.registry = {
 	postgres = require("dbsh.backends.postgres"),
+	snowflake = require("dbsh.backends.snowflake"),
 }
 
 -- Returns the backend, or nil plus an error message. A connection with no

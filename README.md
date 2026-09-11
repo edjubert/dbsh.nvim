@@ -1,7 +1,7 @@
 # dbsh.nvim
 
 Query PostgreSQL from Neovim without leaving your editor, without blocking it,
-and without putting a password in your config.
+and without exposing a password to `psql`.
 
 <!--
 SCREENSHOT docs/media/hero.png
@@ -64,11 +64,12 @@ flight, and `:DbCancel` kills it. A generation counter invalidates results that
 belong to a connection you have already left, so a slow answer can never
 overwrite a fresh one.
 
-### It never asks for a password
+### It never asks `psql` for a password
 
-There is no `password` field to fill in, no hash, and no `PGPASSWORD` in your
-process list. `psql` is always invoked with `-w` and resolves credentials from
-`~/.pgpass`, which is the mechanism PostgreSQL already ships for this.
+`psql` is always invoked with `-w` and resolves credentials from `~/.pgpass`;
+dbsh never puts a password or `PGPASSWORD` in its process list. Managed PgLS is
+an opt-in exception described in [Language server](#language-server): its
+in-memory session secret is sent only through the PgLS RPC, never to `psql`.
 
 ### It knows your schema
 
@@ -95,10 +96,11 @@ read-only definition buffer.
 - Neovim **0.10+** — the plugin uses `vim.system`, `vim.fn.getregion` and
   `vim.fs.joinpath`
 - `psql` on your `PATH`
+- `snow` on your `PATH` when using Snowflake profiles
 - [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim) — **optional**;
   every picker degrades to a clear message without it, and queries work fine
 - [postgres-language-server](https://github.com/supabase-community/postgres-language-server) —
-  **optional**; only needed if you turn on `lsp.enabled`, see
+  **optional**; only needed if you enable an LSP mode, see
   [Language server](#language-server)
 
 ## Installation
@@ -151,7 +153,7 @@ require("telescope").load_extension("dbsh")
 
 ## Quick start
 
-1. Declare a connection in `setup()` — four fields, no password.
+1. Declare a connection in `setup()` — four fields for `psql`, no password.
 2. Add a line for it to `~/.pgpass`, then `chmod 600 ~/.pgpass`.
 3. Open a `.sql` file, put the cursor in a statement, and run
    `:lua require("dbsh").query_paragraph()`.
@@ -177,12 +179,17 @@ require("dbsh").setup({
 	query_timeout = 30000,
 	preview_limit = 10,
 	catalog_page_size = 200,
+	credentials = {
+		cache_ttl_ms = 900000,
+	},
 	csv_delimiter = ",",
 	export_dir = vim.fs.joinpath(vim.fn.stdpath("data"), "dbsh", "exports"),
 	results_split = "horizontal",
 	variable_patterns = {}, -- e.g. { ":(raw_data)" }, see SQL variables below
 	safety = { mode = "confirm" }, -- "confirm" or "off"
-	lsp = { enabled = false }, -- steer postgres-language-server, see below
+	lsp = {
+		mode = "off", -- "off", "external", or "managed"; see below
+	},
 })
 ```
 
@@ -194,14 +201,18 @@ require("dbsh").setup({
 | `query_timeout` | `30000` | Kills a runaway query, in milliseconds. |
 | `preview_limit` | `10` | `LIMIT` used when previewing a table from the picker. |
 | `catalog_page_size` | `200` | Number of catalog objects fetched per page. |
+| `credentials.cache_ttl_ms` | `900000` | In-memory credential cache lifetime for backends that require a password command. |
 | `csv_delimiter` | `","` | Column separator, for both CSV export and CSV yank. |
 | `export_dir` | `<stdpath("data")>/dbsh/exports` | Where `:DbExportCSV` suggests writing. |
 | `results_split` | `"horizontal"` | `"horizontal"`, `"vertical"` or `"float"`: which window opens `__DBSH__` in. Only applies the first time the window is created; combine with `vim.opt.splitright = true` for a right-hand split. `"float"` is styled after your telescope config, when installed. |
 | `variable_patterns` | `{}` | Lua patterns (one capture each) naming SQL variables to prompt for. See [SQL variables](#sql-variables). |
 | `safety` | `{ mode = "confirm" }` | Confirms mutating or ambiguous SQL. Use `{ mode = "off" }` to disable the ergonomic guardrail. |
-| `lsp` | `{ enabled = false }` | Point an already-running [postgres-language-server](#language-server) at the connection you pick. Off by default: it talks to a client dbsh does not own. |
+| `lsp` | `{ mode = "off" }` | Disable PgLS by default. Choose `external` for a user-owned client or `managed` for dbsh-owned PostgreSQL clients. |
 
-There is deliberately **no** `password` field.
+There is deliberately no password field required for SQL execution. `psql`
+always uses `~/.pgpass`. Managed PgLS alone needs an in-memory `password` on
+its PostgreSQL profile, usually sourced from an environment variable as shown
+below; dbsh never passes that value to `psql` or persists it.
 
 ## Authentication
 
@@ -222,69 +233,146 @@ chmod 600 ~/.pgpass
 PostgreSQL silently ignores a `.pgpass` with looser permissions. The symptom is an
 unexpected password prompt, and it is the single most common setup mistake.
 
+### Snowflake
+
+Snowflake profiles use the `snow` CLI only. They are structured profiles: do not
+use a JDBC URL, a Snow CLI named connection, or a literal password.
+
+```lua
+require("dbsh").setup({
+	connections = {
+		warehouse = {
+			type = "snowflake",
+			host = "<account-host>",
+			port = 443,
+			username = "<username>",
+			authenticator = "<native-sso-authenticator-url>",
+			role = "<role>",
+			warehouse = "<warehouse>",
+			database = "<database>",
+			schema = "<optional-schema>",
+			password_command = {
+				"security",
+				"find-generic-password",
+				"-s",
+				"dbsh.snowflake.<profile>",
+				"-w",
+			},
+		},
+	},
+	default = "warehouse",
+})
+```
+
+`password_command` is an argv array, never a shell string. Its output is held
+only in memory and passed only as `SNOWFLAKE_PASSWORD` to the child `snow`
+process. dbsh caches it for 15 minutes by default, clears it on `VimLeavePre`,
+and invalidates it before one retry after a recognized authentication failure.
+
+Every Snowflake query receives the effective role, warehouse, database and
+schema as CLI flags. Manually typed `USE` statements affect only that command;
+they do not update dbsh's context. Raw catalog output uses `JSON_EXT`: scalars
+become cells, null becomes `(NULL)`, and complex values are compact JSON.
+
+Snowflake catalogs include roles, warehouses, databases, schemas, relations,
+functions, sequences, stages, file formats, streams, tasks and pipes. Catalog
+filters are literal and paged. dbsh's confirmation prompt remains an ergonomic
+guardrail; Snowflake role permissions remain the security authority. Run
+`make snowflake-smoke` to verify a private non-mutating connection locally.
+
 ## Language server
 
 [postgres-language-server](https://github.com/supabase-community/postgres-language-server)
 validates SQL against a real database: it will tell you a column does not exist
-before you run the query. It only knows one database at a time, declared in a
-configuration file — which does not survive someone who changes database ten
-times a day.
-
-Turn this on and the database you pick with `:DbDatabases` becomes the database
-it diagnoses against, with no restart and no file editing:
+before you run the query. dbsh supports three explicit modes:
 
 ```lua
 require("dbsh").setup({
-	connections = { ... },
-	lsp = { enabled = true },
+	connections = {
+		local_db = {
+			host = "127.0.0.1",
+			port = 5432,
+			database = "app",
+			username = "app",
+			password = vim.env.PGAPP_PASSWORD,
+			search_path = { "extensions", "public" },
+		},
+	},
+	default = "local_db",
+	lsp = {
+		mode = "managed", -- "off", "external", or "managed"
+		command = { "postgres-language-server", "lsp-proxy" },
+		client_pool = {
+			strategy = "immediate", -- "immediate", "idle", or "session"
+			idle_timeout_ms = 30000,
+		},
+		notifications = { failures = true },
+	},
 })
 ```
 
-dbsh does not start, stop or install the server: it talks to the client **you**
-already run, through lspconfig or mason. It applies to every `.sql` file in the
-session, not just the scratchpad. Picking a schema with `:DbSchemas` pushes the
-same connection again, which costs nothing.
+- `off` is the default and performs no LSP work.
+- `external` preserves the original integration with a client you start through
+  lspconfig, Mason, or another plugin. dbsh never starts, stops, attaches, or
+  detaches that client.
+- `managed` is PostgreSQL-only. dbsh starts and owns PgLS clients for eligible
+  dbsh SQL contexts, then retires them according to the selected pool strategy.
 
-After every successful query, dbsh clears the server's schema cache and warms it
-back up, so a `CREATE TABLE` is reflected in completion right away. It refreshes
-unconditionally rather than guessing which statements were DDL — dbsh never
-parses your SQL. The warm-up takes roughly half a second in the background,
-which is why it happens then rather than under your fingers on the next
-completion.
+`lsp.enabled = true` remains accepted as a deprecated alias for
+`lsp.mode = "external"` and warns once. `false` maps to `off`. An explicit
+`mode` always wins over the old boolean.
 
-### The password
+### External mode
 
-**dbsh pushes the host, the port, the user and the database. Never the
-password.** There is deliberately no `password` field in a dbsh connection, and
-that stays true here: a password pushed through the LSP protocol would land in
-`client.settings`, and in plain text in the Neovim LSP log for anyone running
-`vim.lsp.log` at `debug` level.
+External mode sends the existing password-free
+`workspace/didChangeConfiguration` delta and invalidates/warm-ups PgLS's schema
+cache after successful queries. It never copies dbsh values into the
+user-owned client's `settings` table.
 
-The server only overrides the fields it receives, so the password you declare
-elsewhere survives. Three ways to give it one:
+A user-owned PgLS client has only one effective configuration. With distinct
+buffer contexts, **last-synchronized context wins**: changing one buffer can
+change diagnostics for another. Use `:DbLspStatus` to see the last public
+context dbsh synchronized, or use managed mode when contexts need isolation.
 
-1. A `password` in the project's `postgres-language-server.jsonc` — the nominal
-   path, and what survives dbsh pushing everything else.
-2. `PGPASSWORD` in Neovim's environment.
-3. No password at all: `trust`, a Unix socket, or `peer` authentication.
+### Managed mode
 
-If none applies, the server falls back to its own default, the connection fails,
-and **static diagnostics keep working** — parse errors and lints are unaffected.
-Only completion and type-checking stop, and they recover on their own once the
-connection succeeds.
+Managed mode uses one client per public context key: PostgreSQL connection
+identity, effective database, project root, and the resolved search path
+(selected schema first, then the configured `search_path`, deduplicated).
+Changing one buffer's context detaches only that buffer from its stale client;
+other buffers retain their references.
 
-### Three things that will silently defeat it
+`immediate` stops a client when its final buffer detaches. `idle` waits for
+`idle_timeout_ms` and cancels that timer if a buffer reattaches. `session`
+retains the client until Neovim exits.
 
-- **A `connectionString` in your `postgres-language-server.jsonc` wins over
-  everything.** The server reads the URI first and ignores the individual
-  fields, and dbsh cannot erase a field it does not send. Use the separate
-  `host`/`port`/`username`/`database` fields in that file.
-- **`PGHOST`, `PGPORT`, `PGUSER`, `PGDATABASE` or `DATABASE_URL` in your
-  environment win too**, because the server merges the environment last. This is
-  a real trap if you live in `psql` and export `PGDATABASE`. dbsh warns once per
-  session when it sees one.
-- **Editing `postgres-language-server.jsonc` mid-session** makes the server
-  reload the file and lose what dbsh pushed. Switching connection fixes it.
+The password remains in dbsh memory and is sent only in the
+`pgls/setDatabaseContext` session RPC. It is never put in the spawned command,
+environment, public client key, status output, notification, or persisted dbsh
+state. If starting or configuring PgLS fails, SQL execution remains unaffected;
+dbsh stores a sanitized per-context error and notifies once by default. Set
+`lsp.notifications.failures = false` to suppress that notification.
+
+`:DbLspStatus` reports the active public managed record or, in external mode,
+the user-owned/shared limitation and its last synchronized public context.
+
+Managed mode requires a PgLS binary containing `pgls/setDatabaseContext`. It is
+not available in an unpatched PgLS release. Roll out the PgLS protocol change
+first, then dbsh, and test against a merged or released PgLS binary before
+release.
+
+Until PgLS ships that request, development and review can build the companion
+[upstream PgLS context RPC pull request](https://github.com/supabase-community/postgres-language-server/pull/794):
+
+```bash
+git clone https://github.com/supabase-community/postgres-language-server.git
+cd postgres-language-server
+gh pr checkout 794
+cargo build --release
+```
+
+Point `lsp.command` at the locally built binary only; do not put a
+machine-specific path in shared configuration.
 
 ## Commands
 
@@ -318,6 +406,11 @@ context. PostgreSQL provides:
 
 Catalog searches are literal server-side filters, not arbitrary SQL. They use
 deterministic keyset pagination; choose **Load more** to fetch the next page.
+
+Snowflake provides `:DbRoles`, `:DbWarehouses`, `:DbDatabases`, `:DbSchemas`,
+`:DbRelations`, `:DbFunctions`, `:DbSequences`, `:DbStages`,
+`:DbFileFormats`, `:DbStreams`, `:DbTasks` and `:DbPipes`. Context commands
+and object catalogs share these names where selecting the value is meaningful.
 
 ### Compatibility note
 
