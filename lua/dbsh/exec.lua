@@ -1,17 +1,36 @@
 -- Asynchronous CLI runner.
--- Never blocks the editor and never prompts for a password: everything the
--- invocation needs -- argv, environment, script preamble -- comes from the
--- backend of the current connection, so this module knows no CLI at all.
+-- Every invocation owns an immutable context snapshot, and process slots are
+-- scoped by that snapshot's session ID.
 
 local config = require("dbsh.config")
+local context = require("dbsh.context")
 
 local M = {}
 
--- Injection point: tests replace this with a fake runner.
 M.runner = vim.system
+M.slots = {}
 
--- One in-flight handle per slot, so opening a picker does not cancel a user query.
-M.slots = { user = nil, introspect = nil }
+local function snapshot_for(value)
+	if type(value) == "table" then
+		return value
+	end
+	return context.snapshot(value or 0)
+end
+
+local function slots_for(snapshot, create)
+	local slots = M.slots[snapshot.id]
+	if slots == nil and create then
+		slots = {}
+		M.slots[snapshot.id] = slots
+	end
+	return slots
+end
+
+local function prune_slots(snapshot, slots)
+	if slots.user == nil and slots.introspect == nil and slots.definition == nil then
+		M.slots[snapshot.id] = nil
+	end
+end
 
 function M.write_script(backend, sql, mode)
 	local path = os.tmpname()
@@ -24,62 +43,141 @@ function M.write_script(backend, sql, mode)
 	return path
 end
 
-function M.cancel(slot)
+function M.cancel(slot, snapshot_or_bufnr)
 	slot = slot or "user"
-	local handle = M.slots[slot]
+	local snapshot = snapshot_for(snapshot_or_bufnr)
+	local slots = slots_for(snapshot, false)
+	if slots == nil then
+		return
+	end
+
+	local entry = slots[slot]
+	if entry == nil then
+		return
+	end
+	local handle = entry.handle or entry
 	if handle ~= nil then
 		pcall(function()
 			handle:kill(15)
 		end)
-		M.slots[slot] = nil
 	end
+	slots[slot] = nil
+	prune_slots(snapshot, slots)
 end
 
--- opts: { mode = "pretty"|"raw"?, slot = "user"|"introspect"?, timeout = number? }
+-- opts: {
+--   context = dbsh.context.snapshot()?,
+--   mode = "pretty"|"raw"?,
+--   slot = "user"|"introspect"?,
+--   timeout = number?,
+-- }
 -- callback(code, stdout, stderr)
 function M.run(sql, opts, callback)
 	opts = opts or {}
 	local slot = opts.slot or "user"
+	local snapshot = opts.context or context.snapshot(0)
 
-	local conn = config.current()
-	if conn == nil then
+	if snapshot.connection == nil then
 		callback(1, "", "dbsh.nvim: no current connection")
 		return nil
 	end
 
-	-- Resolved before cancelling anything: killing the running query only to
-	-- fail on a misconfigured connection would help nobody.
-	local backend, err = config.backend()
+	local backend, err = context.backend(snapshot)
 	if backend == nil then
 		callback(1, "", "dbsh.nvim: " .. err)
 		return nil
 	end
 
-	M.cancel(slot)
+	M.cancel(slot, snapshot)
 
 	local mode = opts.mode or "pretty"
-	local generation = config.generation()
 	local tmpfile = M.write_script(backend, sql, mode)
-
+	local slots = slots_for(snapshot, true)
+	local operation = {}
+	slots[slot] = operation
 	local handle = M.runner(
-		backend.argv(conn, tmpfile, mode),
+		backend.argv(snapshot.connection, tmpfile, mode),
 		{
 			text = true,
 			timeout = opts.timeout or config.options().query_timeout,
-			env = backend.env(conn, config.options()),
+			env = backend.env(snapshot.connection, config.options()),
 		},
 		vim.schedule_wrap(function(obj)
 			os.remove(tmpfile)
-			M.slots[slot] = nil
-			-- Drop results that belong to a connection we already left.
-			if generation ~= config.generation() then
+			local current_slots = slots_for(snapshot, false)
+			if current_slots == nil then
+				return
+			end
+			local active = current_slots[slot]
+			if active ~= operation and active ~= operation.handle then
+				return
+			end
+			current_slots[slot] = nil
+			prune_slots(snapshot, current_slots)
+			if not context.is_current(snapshot) then
 				return
 			end
 			callback(obj.code, obj.stdout or "", obj.stderr or "")
 		end)
 	)
 
-	M.slots[slot] = handle
+	operation.handle = handle
+	if slots[slot] == operation then
+		slots[slot] = handle
+	end
+	return handle
+end
+
+-- Runs a backend-provided command (for example pg_dump) without materialising
+-- a temporary SQL script. Definition requests get their own session-local
+-- slot, so refreshing DDL never cancels a user query or catalog request.
+function M.run_argv(snapshot_or_bufnr, request, callback)
+	local snapshot = snapshot_for(snapshot_or_bufnr)
+	request = request or {}
+	if snapshot.connection == nil then
+		callback(1, "", "dbsh.nvim: no current connection")
+		return nil
+	end
+	if type(request.argv) ~= "table" or #request.argv == 0 then
+		callback(1, "", "dbsh.nvim: definition request has no argv")
+		return nil
+	end
+
+	local slot = "definition"
+	M.cancel(slot, snapshot)
+
+	local slots = slots_for(snapshot, true)
+	local operation = {}
+	slots[slot] = operation
+	local handle = M.runner(
+		request.argv,
+		{
+			text = true,
+			timeout = request.timeout or config.options().query_timeout,
+			env = request.env or {},
+		},
+		vim.schedule_wrap(function(obj)
+			local current_slots = slots_for(snapshot, false)
+			if current_slots == nil then
+				return
+			end
+			local active = current_slots[slot]
+			if active ~= operation and active ~= operation.handle then
+				return
+			end
+			current_slots[slot] = nil
+			prune_slots(snapshot, current_slots)
+			if not context.is_current(snapshot) then
+				return
+			end
+			callback(obj.code, obj.stdout or "", obj.stderr or "")
+		end)
+	)
+
+	operation.handle = handle
+	if slots[slot] == operation then
+		slots[slot] = handle
+	end
 	return handle
 end
 

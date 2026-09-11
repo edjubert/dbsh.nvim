@@ -1,24 +1,41 @@
--- Result buffer management.
--- The buffer is reused across queries, which keeps a history of previous
--- results, and never soft-wraps: wide tables scroll horizontally instead.
+-- Result buffer management scoped by dbsh context session.
 
 local float = require("dbsh.float")
 
 local M = {}
 
-local BUFNAME = "__DBSH__"
+local state = {
+	buffers = {},
+	snapshots = {},
+}
 
-function M.find_buf()
-	for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-		if vim.api.nvim_buf_is_valid(buf) then
-			-- nvim_buf_set_name stores an absolute path, so compare basenames.
-			local name = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(buf), ":t")
-			if name == BUFNAME then
-				return buf
-			end
-		end
+local function session_id(snapshot_or_id)
+	if type(snapshot_or_id) == "table" then
+		return snapshot_or_id.id
 	end
-	return nil
+	return snapshot_or_id
+end
+
+local function remember(snapshot)
+	state.snapshots[snapshot.id] = vim.deepcopy(snapshot)
+end
+
+local function label(snapshot)
+	return snapshot.connection_name or snapshot.id
+end
+
+function M.find_buf(snapshot_or_id)
+	local id = session_id(snapshot_or_id)
+	if id == nil then
+		return nil
+	end
+	local buf = state.buffers[id]
+	if buf ~= nil and not vim.api.nvim_buf_is_valid(buf) then
+		state.buffers[id] = nil
+		state.snapshots[id] = nil
+		return nil
+	end
+	return buf
 end
 
 function M.find_win(buf)
@@ -30,22 +47,38 @@ function M.find_win(buf)
 	return nil
 end
 
+function M.context_snapshot(bufnr)
+	if bufnr == nil or bufnr == 0 then
+		bufnr = vim.api.nvim_get_current_buf()
+	end
+	if not vim.api.nvim_buf_is_valid(bufnr) then
+		return nil
+	end
+	local ok, id = pcall(vim.api.nvim_buf_get_var, bufnr, "dbsh_context_id")
+	if not ok then
+		return nil
+	end
+	local snapshot = state.snapshots[id]
+	return snapshot and vim.deepcopy(snapshot) or nil
+end
+
 -- opts: { split = "horizontal"|"vertical"|"float"?, focus = boolean? }.
--- `split` is only read the first time a window is created for this buffer:
--- once open, the existing window is reused regardless of what a later call
--- asks for. `focus` only applies to a float, and defaults to true.
-function M.open(opts)
+function M.open(snapshot, opts)
 	opts = opts or {}
-	local buf = M.find_buf()
+	local buf = M.find_buf(snapshot)
+	remember(snapshot)
 	if buf == nil then
 		buf = vim.api.nvim_create_buf(false, true)
-		vim.api.nvim_buf_set_name(buf, BUFNAME)
+		vim.api.nvim_buf_set_name(buf, "__DBSH__ " .. label(snapshot))
+		vim.api.nvim_buf_set_var(buf, "dbsh_context_id", snapshot.id)
 		vim.bo[buf].buftype = "nofile"
 		vim.bo[buf].bufhidden = "hide"
 		vim.bo[buf].swapfile = false
 		vim.bo[buf].filetype = "sql"
+		state.buffers[snapshot.id] = buf
 	end
 
+	local previous_win = vim.api.nvim_get_current_win()
 	local win = M.find_win(buf)
 	if win == nil then
 		if opts.split == "float" then
@@ -57,20 +90,18 @@ function M.open(opts)
 		end
 	end
 
-	-- Rendered by the plugin only: hand editing would desync it from psql.
 	vim.bo[buf].modifiable = false
-
-	-- Wide result tables must scroll horizontally instead of soft-wrapping.
 	vim.wo[win].wrap = false
 	vim.wo[win].sidescrolloff = 0
 
+	if opts.focus == false and vim.api.nvim_win_is_valid(previous_win) then
+		vim.api.nvim_set_current_win(previous_win)
+	end
 	return buf, win
 end
 
--- Closes the result window, if one is open. The buffer and its content
--- survive: a later render() or toggle() brings it back as-is.
-function M.close()
-	local buf = M.find_buf()
+function M.close(snapshot)
+	local buf = M.find_buf(snapshot)
 	if buf == nil then
 		return
 	end
@@ -80,43 +111,35 @@ function M.close()
 	end
 end
 
--- Toggles the result window: closes it if open, otherwise reopens it with
--- focus. Returns false when there is no result yet to show.
-function M.toggle(opts)
-	local buf = M.find_buf()
+function M.toggle(snapshot, opts)
+	local buf = M.find_buf(snapshot)
 	if buf == nil then
 		return false
 	end
 	if M.find_win(buf) ~= nil then
-		M.close()
+		M.close(snapshot)
 	else
-		M.open(vim.tbl_extend("force", opts or {}, { focus = true }))
+		M.open(snapshot, vim.tbl_extend("force", opts or {}, { focus = true }))
 	end
 	return true
 end
 
 local function set_lines(buf, lines)
-	-- nvim_buf_set_lines refuses a non-modifiable buffer, so lift the
-	-- protection for the write and put it straight back.
 	vim.bo[buf].modifiable = true
 	vim.api.nvim_buf_set_lines(buf, 0, -1, true, lines)
 	vim.bo[buf].modifiable = false
 end
 
--- nvim_buf_set_lines rejects an item holding a newline, so a multi-line
--- query has to be spread over as many entries as it has lines.
 local function split_lines(text)
 	return vim.split(text or "", "\n", { plain = true })
 end
 
--- A query result never steals focus on its own: only :DbToggleResults
--- (via M.toggle) does, so typing in a .sql file is never interrupted.
 local function without_focus(opts)
 	return vim.tbl_extend("force", opts or {}, { focus = false })
 end
 
-function M.running(query, opts)
-	local buf = M.open(without_focus(opts))
+function M.running(snapshot, query, opts)
+	local buf = M.open(snapshot, without_focus(opts))
 	local lines = { "# Running..." }
 	vim.list_extend(lines, split_lines(query))
 	table.insert(lines, "")
@@ -125,8 +148,8 @@ function M.running(query, opts)
 	return buf
 end
 
-function M.render(query, output, opts)
-	local buf = M.open(without_focus(opts))
+function M.render(snapshot, query, output, opts)
+	local buf = M.open(snapshot, without_focus(opts))
 	local lines = split_lines(query)
 	table.insert(lines, "")
 	vim.list_extend(lines, split_lines(output))

@@ -2,15 +2,12 @@ local helpers = dofile("tests/helpers.lua")
 local eq = helpers.eq
 
 local config = require("dbsh.config")
+local context = require("dbsh.context")
 local lsp = require("dbsh.lsp")
 
 local original_clients, original_buffers, original_notify
+local active_snapshot
 
--- A stand-in for a vim.lsp client, recording what dbsh sends it. notify and
--- request are written to work under both shims: the 0.10 branch calls
--- notify(method, params), the 0.11 branch calls client:notify(method, params).
--- The request handler fires synchronously, which is what makes the warm-up
--- observable without waiting for a server.
 local function fake_client(name)
 	local client = { name = name, id = 1, settings = {}, notified = {}, requested = {}, handlers = {} }
 
@@ -39,11 +36,19 @@ end
 local function setup_with(lsp_opts)
 	config.setup({
 		connections = {
-			local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
+			local_db = {
+				host = "localhost",
+				port = 5432,
+				database = "postgres",
+				username = "dev",
+				password = "never-send",
+			},
 		},
 		default = "local_db",
 		lsp = lsp_opts,
 	})
+	context.setup()
+	return context.snapshot(0)
 end
 
 local T = MiniTest.new_set({
@@ -53,7 +58,7 @@ local T = MiniTest.new_set({
 			original_buffers = lsp._buffers
 			original_notify = vim.notify
 			lsp._warned = { env = false, command = false }
-			setup_with({ enabled = true })
+			active_snapshot = setup_with({ enabled = true })
 		end,
 		post_case = function()
 			lsp._clients = original_clients
@@ -64,13 +69,11 @@ local T = MiniTest.new_set({
 	},
 })
 
-T["pushes the connection without a password"] = function()
+T["pushes an explicit context without a password"] = function()
 	local client = fake_client("postgres_lsp")
-	lsp._clients = function()
-		return { client }
-	end
+	lsp._clients = function() return { client } end
 
-	lsp.sync()
+	lsp.sync_external(active_snapshot)
 
 	eq(#client.notified, 1)
 	eq(client.notified[1].method, "workspace/didChangeConfiguration")
@@ -84,30 +87,26 @@ T["pushes the connection without a password"] = function()
 	eq(client.notified[1].params.settings.db.password, nil)
 end
 
-T["merges into the existing settings rather than replacing them"] = function()
+T["preserves user-owned settings but sends a password-free delta"] = function()
 	local client = fake_client("postgres_lsp")
 	client.settings = { db = { password = "kept" }, other = true }
-	lsp._clients = function()
-		return { client }
-	end
+	lsp._clients = function() return { client } end
 
-	lsp.sync()
+	lsp.sync_external(active_snapshot)
 
 	eq(client.settings.other, true)
 	eq(client.settings.db.password, "kept")
 	eq(client.settings.db.database, "postgres")
-	-- The notification carries the merged table, not just the delta.
-	eq(client.notified[1].params.settings, client.settings)
+	eq(client.notified[1].params.settings.db.password, nil)
+	eq(client.notified[1].params.settings.other, nil)
 end
 
 T["does nothing when the integration is disabled"] = function()
-	setup_with({ enabled = false })
+	local snapshot = setup_with({ enabled = false })
 	local client = fake_client("postgres_lsp")
-	lsp._clients = function()
-		return { client }
-	end
+	lsp._clients = function() return { client } end
 
-	lsp.sync()
+	lsp.sync_external(snapshot)
 
 	eq(#client.notified, 0)
 end
@@ -119,11 +118,8 @@ T["does nothing when the backend declares no language server"] = function()
 	postgres.lsp = nil
 
 	local client = fake_client("postgres_lsp")
-	lsp._clients = function()
-		return { client }
-	end
-
-	lsp.sync()
+	lsp._clients = function() return { client } end
+	lsp.sync_external(active_snapshot)
 	postgres.lsp = saved
 
 	eq(#client.notified, 0)
@@ -136,18 +132,18 @@ T["does nothing when no client is alive"] = function()
 		return {}
 	end
 
-	lsp.sync()
+	lsp.sync_external(active_snapshot)
 
 	eq(called, true)
 end
 
-T["syncs one freshly attached client, and only if it is the right one"] = function()
+T["syncs one freshly attached client only when it is the right one"] = function()
 	local right = fake_client("postgres_lsp")
 	local wrong = fake_client("lua_ls")
 
-	lsp.sync_client(right)
-	lsp.sync_client(wrong)
-	lsp.sync_client(nil)
+	lsp.sync_external_client(right, active_snapshot)
+	lsp.sync_external_client(wrong, active_snapshot)
+	lsp.sync_external_client(nil, active_snapshot)
 
 	eq(#right.notified, 1)
 	eq(#wrong.notified, 0)
@@ -163,27 +159,20 @@ T["warns once about a conflicting environment variable"] = function()
 	end
 
 	local client = fake_client("postgres_lsp")
-	lsp._clients = function()
-		return { client }
-	end
-
-	lsp.sync()
-	lsp.sync()
+	lsp._clients = function() return { client } end
+	lsp.sync_external(active_snapshot)
+	lsp.sync_external(active_snapshot)
 
 	eq(warnings, 1)
 end
 
-T["invalidates then warms the schema cache"] = function()
+T["invalidates then warms the schema cache for an explicit context"] = function()
 	local client = fake_client("postgres_lsp")
 	local buf = vim.api.nvim_create_buf(false, true)
-	lsp._clients = function()
-		return { client }
-	end
-	lsp._buffers = function()
-		return { buf }
-	end
+	lsp._clients = function() return { client } end
+	lsp._buffers = function() return { buf } end
 
-	lsp.invalidate()
+	lsp.invalidate_external(active_snapshot)
 
 	eq(#client.requested, 2)
 	eq(client.requested[1].method, "workspace/executeCommand")
@@ -197,27 +186,21 @@ end
 
 T["skips the warm-up when no buffer is attached"] = function()
 	local client = fake_client("postgres_lsp")
-	lsp._clients = function()
-		return { client }
-	end
-	lsp._buffers = function()
-		return {}
-	end
+	lsp._clients = function() return { client } end
+	lsp._buffers = function() return {} end
 
-	lsp.invalidate()
+	lsp.invalidate_external(active_snapshot)
 
 	eq(#client.requested, 1)
 	eq(client.requested[1].method, "workspace/executeCommand")
 end
 
 T["does not invalidate when the integration is disabled"] = function()
-	setup_with({ enabled = false })
+	local snapshot = setup_with({ enabled = false })
 	local client = fake_client("postgres_lsp")
-	lsp._clients = function()
-		return { client }
-	end
+	lsp._clients = function() return { client } end
 
-	lsp.invalidate()
+	lsp.invalidate_external(snapshot)
 
 	eq(#client.requested, 0)
 end
@@ -225,12 +208,8 @@ end
 T["warns once when the server refuses the command"] = function()
 	local client = fake_client("postgres_lsp")
 	client.request_error = { message = "unknown command" }
-	lsp._clients = function()
-		return { client }
-	end
-	lsp._buffers = function()
-		return {}
-	end
+	lsp._clients = function() return { client } end
+	lsp._buffers = function() return {} end
 
 	local warnings = 0
 	vim.notify = function(msg, level)
@@ -239,12 +218,10 @@ T["warns once when the server refuses the command"] = function()
 		end
 	end
 
-	lsp.invalidate()
-	lsp.invalidate()
+	lsp.invalidate_external(active_snapshot)
+	lsp.invalidate_external(active_snapshot)
 
 	eq(warnings, 1)
-	-- Two invalidate() calls, two executeCommand, and no warm-up at all: the
-	-- refusal stops the sequence, there is nothing to warm if nothing was cleared.
 	eq(#client.requested, 2)
 	eq(client.requested[1].method, "workspace/executeCommand")
 	eq(client.requested[2].method, "workspace/executeCommand")

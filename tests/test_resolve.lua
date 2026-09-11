@@ -2,6 +2,7 @@ local helpers = dofile("tests/helpers.lua")
 local eq = helpers.eq
 
 local config = require("dbsh.config")
+local context = require("dbsh.context")
 local history = require("dbsh.history")
 local resolve = require("dbsh.resolve")
 
@@ -30,6 +31,7 @@ local T = MiniTest.new_set({
 				default = "local_db",
 				variable_patterns = { ":(raw_data)", ":(period)" },
 			})
+			context.setup()
 			original_picker = resolve.picker
 			original_dir = history.dir
 			tmpdir = vim.fn.tempname()
@@ -99,6 +101,7 @@ T["gives up when the backend cannot be resolved"] = function()
 		default = "weird",
 		variable_patterns = { ":(raw_data)" },
 	})
+	context.setup()
 	stub_answers({ raw_data = "public.events" })
 
 	local original_notify = vim.notify

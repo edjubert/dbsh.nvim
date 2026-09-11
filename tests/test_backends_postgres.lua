@@ -155,9 +155,19 @@ T["rejects an unknown backend"] = function()
 	expect_match(err, "unknown connection type")
 end
 
+T["enumerates registered backends in deterministic name order"] = function()
+	local original = backends.registry.test_catalog
+	backends.registry.test_catalog = { name = "test_catalog", contexts = {}, catalogs = {} }
+
+	local names = vim.tbl_map(function(backend) return backend.name end, backends.all())
+
+	backends.registry.test_catalog = original
+	eq(names, { "postgres", "test_catalog" })
+end
+
 local original_runner
 
-T["levels"] = MiniTest.new_set({
+T["contracts"] = MiniTest.new_set({
 	hooks = {
 		pre_case = function()
 			require("dbsh.config").setup({
@@ -166,19 +176,25 @@ T["levels"] = MiniTest.new_set({
 				},
 				default = "local_db",
 			})
+			require("dbsh.context").setup()
 			original_runner = require("dbsh.exec").runner
 		end,
 		post_case = function()
 			local exec = require("dbsh.exec")
 			exec.runner = original_runner
-			exec.slots = { user = nil, introspect = nil }
+			exec.slots = {}
 		end,
 	},
 })
 
 -- Replaces the runner with one that immediately returns the given output.
-local function stub_output(stdout, code)
-	require("dbsh.exec").runner = function(_, _, on_exit)
+local function stub_output(stdout, code, on_run)
+	require("dbsh.exec").runner = function(argv, _, on_exit)
+		if on_run ~= nil then
+			local script = assert(io.open(argv[#argv], "r"))
+			on_run(script:read("*a"))
+			script:close()
+		end
 		vim.schedule(function()
 			on_exit({ code = code or 0, stdout = stdout, stderr = code == 0 and "" or "boom" })
 		end)
@@ -186,69 +202,194 @@ local function stub_output(stdout, code)
 	end
 end
 
-T["levels"]["declares database, schema and relation"] = function()
-	eq(#postgres.levels, 3)
-	eq(postgres.levels[1].key, "database")
-	eq(postgres.levels[1].command, "Databases")
-	eq(postgres.levels[1].on_select, "set_level")
-	eq(postgres.levels[2].key, "schema")
-	eq(postgres.levels[2].command, "Schemas")
-	eq(postgres.levels[2].on_select, "descend")
-	eq(postgres.levels[3].key, "relation")
-	eq(postgres.levels[3].command, "Tables")
-	eq(type(postgres.levels[3].on_select), "function")
-end
-
-T["levels"]["lists databases as plain entries"] = function()
-	stub_output("postgres\nanalytics\n")
-	local got
-	postgres.levels[1].list({}, function(items) got = items end)
-	vim.wait(500, function() return got ~= nil end)
-	eq(got, {
-		{ value = "postgres", display = "postgres", ordinal = "postgres" },
-		{ value = "analytics", display = "analytics", ordinal = "analytics" },
+T["contracts"]["declares explicit context selectors and object catalogs"] = function()
+	eq(#postgres.contexts, 2)
+	eq(postgres.contexts[1].key, "database")
+	eq(postgres.contexts[1].command, "Databases")
+	eq(type(postgres.contexts[1].apply), "function")
+	eq(postgres.contexts[2].key, "schema")
+	eq(postgres.contexts[2].command, "Schemas")
+	eq(vim.tbl_map(function(definition) return definition.key end, postgres.catalogs), {
+		"relations",
+		"tables",
+		"columns",
+		"indexes",
+		"constraints",
+		"sequences",
+		"routines",
+		"types",
+		"policies",
+		"triggers",
+		"extensions",
+	})
+	eq(vim.tbl_map(function(definition) return definition.command end, postgres.catalogs), {
+		"Relations",
+		"Tables",
+		"Columns",
+		"Indexes",
+		"Constraints",
+		"Sequences",
+		"Functions",
+		"Types",
+		"Policies",
+		"Triggers",
+		"Extensions",
 	})
 end
 
-T["levels"]["lists schemas as plain entries"] = function()
+T["contracts"]["lists databases as paged context choices"] = function()
+	stub_output("postgres\nanalytics\n")
+	local got
+	postgres.contexts[1].list({}, function(page) got = page end)
+	vim.wait(500, function() return got ~= nil end)
+	eq(got, {
+		items = {
+			{ value = "postgres", display = "postgres", ordinal = "postgres" },
+			{ value = "analytics", display = "analytics", ordinal = "analytics" },
+		},
+		next_cursor = nil,
+	})
+end
+
+T["contracts"]["lists schemas as paged context choices"] = function()
 	stub_output("public\nanalytics\n")
 	local got
-	postgres.levels[2].list({}, function(items) got = items end)
+	postgres.contexts[2].list({}, function(page) got = page end)
 	vim.wait(500, function() return got ~= nil end)
-	eq(#got, 2)
-	eq(got[1].value, "public")
+	eq(#got.items, 2)
+	eq(got.items[1].value, "public")
 end
 
-T["levels"]["lists relations with their schema, name and kind"] = function()
-	stub_output("public\tusers\tr\nanalytics\tevents\tv\n")
+T["contracts"]["lists relations with their schema, name and kind"] = function()
+	stub_output("public\tusers\tr\t100\nanalytics\tevents\tv\t101\n")
 	local got
-	postgres.levels[3].list({}, function(items) got = items end)
+	postgres.catalogs[1].list({ scope = {}, limit = 2 }, function(page) got = page end)
 	vim.wait(500, function() return got ~= nil end)
-	eq(#got, 2)
-	eq(got[1].value, { schema = "public", name = "users", kind = "r" })
-	eq(got[1].ordinal, "public.users")
-	expect_match(got[1].display, "table")
-	expect_match(got[2].display, "view")
+	eq(#got.items, 2)
+	eq(got.items[1].value, {
+		kind = "relation",
+		oid = "100",
+		schema = "public",
+		name = "users",
+		relkind = "r",
+	})
+	eq(got.items[1].display, "public.users  [table]")
+	eq(got.items[2].value.relkind, "v")
 end
 
-T["levels"]["filters relations by the schema in the context"] = function()
-	stub_output("public\tusers\tr\nanalytics\tevents\tv\n")
+T["contracts"]["filters relations by the requested scope on the server"] = function()
+	local sql
+	stub_output("analytics\tevents\tv\t101\n", nil, function(value) sql = value end)
 	local got
-	postgres.levels[3].list({ schema = "analytics" }, function(items) got = items end)
+	postgres.catalogs[1].list({ scope = { schema = "analytics", all_schemas = false }, limit = 2 }, function(page) got = page end)
 	vim.wait(500, function() return got ~= nil end)
-	eq(#got, 1)
-	eq(got[1].value.name, "events")
+	eq(#got.items, 1)
+	eq(got.items[1].value.name, "events")
+	assert(sql:find("n.nspname = E'analytics'", 1, true) ~= nil)
 end
 
-T["levels"]["surfaces the error when the CLI fails"] = function()
+T["contracts"]["does not add a schema predicate for an all-schema relation listing"] = function()
+	local sql
+	stub_output("", nil, function(value) sql = value end)
+	local done = false
+	postgres.catalogs[1].list({ scope = { schema = "analytics", all_schemas = true }, limit = 2 }, function() done = true end)
+	vim.wait(500, function() return done end)
+	assert(sql:find("n.nspname = E'analytics'", 1, true) == nil)
+end
+
+T["contracts"]["keeps foreign tables in relations but not in compatibility tables"] = function()
+	local relations_sql, tables_sql
+	stub_output("", nil, function(value) relations_sql = value end)
+	local relations_done = false
+	postgres.catalogs[1].list({ scope = {}, limit = 2 }, function() relations_done = true end)
+	vim.wait(500, function() return relations_done end)
+
+	stub_output("", nil, function(value) tables_sql = value end)
+	local tables_done = false
+	postgres.catalogs[2].list({ scope = {}, limit = 2 }, function() tables_done = true end)
+	vim.wait(500, function() return tables_done end)
+
+	assert(relations_sql:find("c.relkind IN ('r', 'v', 'm', 'p', 'f')", 1, true) ~= nil)
+	assert(tables_sql:find("c.relkind IN ('r', 'v', 'm', 'p')", 1, true) ~= nil)
+	assert(tables_sql:find("'f'", 1, true) == nil)
+end
+
+T["contracts"]["builds each catalog query with server filtering, keyset ordering, and limit plus one"] = function()
+	for _, definition in ipairs(postgres.catalogs) do
+		local sql
+		stub_output("", nil, function(value) sql = value end)
+		local done = false
+		definition.list({
+			scope = { schema = "analytics", all_schemas = false },
+			query = "a_b%'\\",
+			limit = 2,
+		}, function() done = true end)
+		vim.wait(500, function() return done end)
+		expect_match(sql, "ORDER BY")
+		expect_match(sql, "LIMIT 3")
+		expect_match(sql, "ILIKE")
+		assert(sql:find("n.nspname = E'analytics'", 1, true) ~= nil)
+	end
+end
+
+T["contracts"]["escapes literal catalog filters without creating SQL fragments"] = function()
+	eq(postgres.quote_literal("a_b%'\\"), "E'a\\\\_b\\\\%''\\\\'")
+	local sql
+	stub_output("", nil, function(value) sql = value end)
+	local done = false
+	postgres.catalogs[1].list({
+		scope = {},
+		query = "a_b%'\\",
+		limit = 2,
+	}, function() done = true end)
+	vim.wait(500, function() return done end)
+	assert(sql:find("ILIKE '%' || E'a\\\\_b\\\\%''\\\\' || '%' ESCAPE E'\\\\'", 1, true) ~= nil)
+end
+
+T["contracts"]["rejects malformed cursors before starting psql"] = function()
+	local started = false
+	stub_output("", nil, function() started = true end)
+	local err
+	postgres.catalogs[1].list({
+		scope = {},
+		limit = 2,
+		cursor = "not json",
+	}, function(_, value) err = value end)
+	expect_match(err, "malformed catalog cursor")
+	eq(started, false)
+end
+
+T["contracts"]["uses the sentinel row only to emit a next cursor"] = function()
+	stub_output("public\taccounts\tr\t100\npublic\torders\tr\t101\npublic\tusers\tr\t102\n")
+	local got
+	postgres.catalogs[1].list({ scope = {}, limit = 2 }, function(page) got = page end)
+	vim.wait(500, function() return got ~= nil end)
+	eq(vim.tbl_map(function(item) return item.value.name end, got.items), { "accounts", "orders" })
+	eq(vim.json.decode(got.next_cursor), { "public", "orders", "101" })
+end
+
+T["contracts"]["adds a keyset predicate from an opaque cursor"] = function()
+	local sql
+	stub_output("", nil, function(value) sql = value end)
+	local done = false
+	postgres.catalogs[1].list({
+		scope = {},
+		limit = 2,
+		cursor = postgres.encode_cursor({ "public", "orders", "101" }),
+	}, function() done = true end)
+	vim.wait(500, function() return done end)
+	assert(sql:find("c.oid > E'101'::oid", 1, true) ~= nil)
+end
+
+T["contracts"]["surfaces the error when the CLI fails"] = function()
 	stub_output("", 2)
 	local err
-	postgres.levels[1].list({}, function(_, e) err = e end)
+	postgres.contexts[1].list({}, function(_, e) err = e end)
 	vim.wait(500, function() return err ~= nil end)
 	expect_match(err, "boom")
 end
 
-T["levels"]["labels every supported relkind"] = function()
+T["contracts"]["labels every supported relkind"] = function()
 	eq(postgres.kind_label("r"), "table")
 	eq(postgres.kind_label("v"), "view")
 	eq(postgres.kind_label("m"), "matview")
@@ -256,16 +397,59 @@ T["levels"]["labels every supported relkind"] = function()
 	eq(postgres.kind_label("x"), "x")
 end
 
-T["levels"]["previews the selected relation"] = function()
+T["contracts"]["previews the selected relation"] = function()
 	local dbsh = require("dbsh")
 	local original = dbsh.query
 	local asked
 	dbsh.query = function(sql) asked = sql end
 
-	postgres.levels[3].on_select({ schema = "public", name = "users" }, {})
+	postgres.catalogs[1].on_select({
+		value = { schema = "public", name = "users", kind = "relation", oid = "100", relkind = "r" },
+	}, {})
 
 	dbsh.query = original
 	eq(asked, 'SELECT * FROM "public"."users" LIMIT 10;')
+end
+
+T["builds faithful definition requests without reading runtime config"] = function()
+	local snapshot = {
+		connection = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
+	}
+	local relation_request = assert(postgres.definition_request(snapshot, {
+		kind = "relation",
+		oid = "42",
+		schema = "public",
+		name = 'we"ird',
+		relkind = "v",
+	}))
+	eq(relation_request.kind, "argv")
+	eq(relation_request.argv[1], "pg_dump")
+	eq(vim.tbl_contains(relation_request.argv, '--table="public"."we""ird"'), true)
+	eq(relation_request.env.PGCONNECT_TIMEOUT, "5")
+	expect_match(relation_request.fallback.sql, "pg_get_viewdef")
+
+	local index_request = assert(postgres.definition_request(snapshot, { kind = "index", oid = "99" }))
+	eq(index_request.kind, "sql")
+	expect_match(index_request.sql, "pg_get_indexdef")
+
+	local constraint_request = assert(postgres.definition_request(snapshot, {
+		kind = "constraint",
+		oid = "100",
+		schema = "public",
+		name = "users_pkey",
+		relation = { schema = "public", name = "users", oid = "42" },
+	}))
+	expect_match(constraint_request.sql, "ALTER TABLE")
+	expect_match(constraint_request.sql, "pg_get_constraintdef")
+
+	local routine_request = assert(postgres.definition_request(snapshot, { kind = "routine", oid = "101" }))
+	expect_match(routine_request.sql, "pg_get_functiondef")
+	local trigger_request = assert(postgres.definition_request(snapshot, { kind = "trigger", oid = "102" }))
+	expect_match(trigger_request.sql, "pg_get_triggerdef")
+
+	local unavailable, err = postgres.definition_request(snapshot, { kind = "policy", name = "tenant" })
+	eq(unavailable, nil)
+	expect_match(err, "not available")
 end
 
 return T
