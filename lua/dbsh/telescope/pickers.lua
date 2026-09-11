@@ -5,6 +5,7 @@
 -- message when it is not installed.
 
 local config = require("dbsh.config")
+local catalog = require("dbsh.catalog")
 local context = require("dbsh.context")
 local scratch = require("dbsh.scratch")
 
@@ -67,30 +68,6 @@ local function bind_enter(t, bufnr, map, handler)
 	end
 	map("i", "<CR>", select)
 	map("n", "<CR>", select)
-end
-
-function M.connections()
-	local t = require_telescope()
-	if t == nil then
-		return
-	end
-
-	open(t, {
-		title = "dbsh connections",
-		results = config.names(),
-		entry_maker = plain_entry,
-		attach_mappings = function(bufnr, map)
-			bind_enter(t, bufnr, map, function(entry)
-				local _, err = context.bind(0, entry.value, "connections")
-				if err ~= nil then
-					notify_error(err)
-				else
-					vim.notify("psql.nvim: connected to " .. entry.value)
-				end
-			end)
-			return true
-		end,
-	})
 end
 
 local function scratchpad_label(item)
@@ -247,77 +224,232 @@ function M.scratchpads()
 	})
 end
 
--- on_select is "set_level" (fix this level on the current connection),
--- "descend" (open the level below with an enriched context), or a function
--- taking the selected value and the context.
-function M.select(backend, index, ctx, value)
-	local level = backend.levels[index]
-	if level.on_select == "set_level" then
-		local _, err = context.set_level(0, level.key, value, "catalog")
-		if err ~= nil then
-			notify_error(err)
-		else
-			vim.notify(string.format("dbsh.nvim: using %s %s", level.key, tostring(value)))
+local function contract_for(backend, kind, key)
+	for _, definition in ipairs(backend[kind] or {}) do
+		if definition.key == key then
+			return definition
 		end
-	elseif level.on_select == "descend" then
-		local down = vim.deepcopy(ctx)
-		down[level.key] = value
-		M.level(index + 1, down)
-	else
-		level.on_select(value, ctx)
 	end
+	return nil
 end
 
--- index is a position in backend.levels; ctx holds the values already chosen
--- for the levels above it, e.g. { schema = "public" }.
-function M.level(index, ctx)
-	ctx = ctx or {}
-	local t = require_telescope()
+local function current_backend()
+	local snapshot = context.snapshot(0)
+	local backend, err = context.backend(snapshot)
+	if backend == nil then
+		return nil, nil, err
+	end
+	return snapshot, backend, nil
+end
+
+local function item_label(item)
+	if type(item) ~= "table" then
+		return tostring(item)
+	end
+	if item.display ~= nil then
+		return item.display
+	end
+	if item.title ~= nil then
+		return item.title
+	end
+	if item.schema ~= nil and item.name ~= nil then
+		return string.format("%s.%s", item.schema, item.name)
+	end
+	if item.value ~= nil then
+		return tostring(item.value)
+	end
+	return item.name or item.key or item.kind or vim.inspect(item)
+end
+
+local function choose(title, items, callback)
+	local t = M._telescope()
 	if t == nil then
+		vim.ui.select(items, {
+			prompt = title .. ": ",
+			format_item = item_label,
+		}, callback)
 		return
 	end
+	open(t, {
+		title = title,
+		results = items,
+		entry_maker = function(item)
+			local label = item_label(item)
+			return { value = item, display = label, ordinal = label }
+		end,
+		attach_mappings = function(bufnr, map)
+			bind_enter(t, bufnr, map, function(entry)
+				callback(entry and entry.value)
+			end)
+			return true
+		end,
+	})
+end
 
-	local backend, err = context.backend(context.snapshot(0))
+local function choose_profile(callback)
+	choose("dbsh connections", config.names(), callback)
+end
+
+function M.connections()
+	choose_profile(function(connection_name)
+		if connection_name == nil then
+			return
+		end
+		local current, err = context.bind(0, connection_name, "connections")
+		if current == nil then
+			return notify_error(err)
+		end
+		local backend, backend_err = context.backend(context.snapshot(0))
+		if backend == nil then
+			return notify_error(backend_err)
+		end
+		if contract_for(backend, "contexts", "database") ~= nil then
+			M.context("database", { preferred = context.snapshot(0).levels.database })
+		end
+	end)
+end
+
+function M.global_connection()
+	choose_profile(function(connection_name)
+		if connection_name == nil then
+			return
+		end
+		local _, err = context.set_global(connection_name, "global")
+		if err ~= nil then
+			notify_error(err)
+		end
+	end)
+end
+
+function M.context(key, options)
+	options = options or {}
+	local snapshot, backend, err = current_backend()
 	if backend == nil then
 		return notify_error(err)
 	end
-
-	local level = backend.levels[index]
-	if level == nil then
-		return notify_error(string.format("no level %s on a %s connection", tostring(index), backend.name))
+	local definition = contract_for(backend, "contexts", key)
+	if definition == nil then
+		return notify_error(string.format("%s is not available for %s", key, backend.name))
 	end
 
-	vim.notify(string.format("dbsh.nvim: fetching %s...", level.command:lower()))
-	level.list(ctx, function(items, list_err)
-		if list_err ~= nil then
-			return notify_error(list_err)
+	catalog.request(snapshot, definition, {
+		query = options.query,
+		cursor = options.cursor,
+	}, function(page, request_err)
+		if request_err ~= nil then
+			return notify_error(request_err)
 		end
-		open(t, {
-			title = "dbsh " .. level.command:lower(),
-			results = items,
-			-- The backend already shapes each item as a Telescope entry.
-			entry_maker = function(item) return item end,
-			attach_mappings = function(bufnr, map)
-				bind_enter(t, bufnr, map, function(entry)
-					M.select(backend, index, ctx, entry.value)
-				end)
+		local items = vim.deepcopy(page.items)
+		if options.preferred ~= nil then
+			table.sort(items, function(a, b)
+				return a.value == options.preferred and b.value ~= options.preferred
+			end)
+		end
+		choose("dbsh " .. definition.title:lower(), items, function(item)
+			if item == nil then
+				return
+			end
+			local value = item.value ~= nil and item.value or item
+			local applied, apply_err = definition.apply(snapshot, value)
+			if applied == nil then
+				return notify_error(apply_err)
+			end
+			if options.on_selected ~= nil then
+				options.on_selected(value, context.snapshot(snapshot.bufnr))
+			end
+		end)
+	end)
+end
 
-				-- Normal mode only: mapping <BS> in insert mode would break
-				-- character deletion in the Telescope prompt. Offered only
-				-- when we actually descended from the level above.
-				local previous = backend.levels[index - 1]
-				if previous ~= nil and ctx[previous.key] ~= nil then
-					map("n", "<BS>", function()
-						t.actions.close(bufnr)
-						local up = vim.deepcopy(ctx)
-						up[previous.key] = nil
-						M.level(index - 1, up)
-					end)
-				end
-				return true
+function M.objects()
+	local _, backend, err = current_backend()
+	if backend == nil then
+		return notify_error(err)
+	end
+	choose("dbsh objects", backend.catalogs or {}, function(definition)
+		if definition ~= nil then
+			M.catalog(definition.key)
+		end
+	end)
+end
+
+local function choose_scope(snapshot, callback)
+	if snapshot.levels.schema ~= nil then
+		callback({ schema = snapshot.levels.schema, all_schemas = false })
+		return
+	end
+	choose("dbsh schema scope", {
+		{ kind = "schema", display = "Select schema…" },
+		{ kind = "all", display = "All schemas" },
+	}, function(choice)
+		if choice == nil then
+			return
+		end
+		if choice.kind == "all" then
+			callback({ schema = nil, all_schemas = true })
+			return
+		end
+		M.context("schema", {
+			on_selected = function(value)
+				callback({ schema = value, all_schemas = false })
 			end,
 		})
 	end)
+end
+
+function M._debounce(callback)
+	callback()
+end
+
+function M.catalog(key, options)
+	options = options or {}
+	local snapshot, backend, err = current_backend()
+	if backend == nil then
+		return notify_error(err)
+	end
+	local definition = contract_for(backend, "catalogs", key)
+	if definition == nil then
+		return notify_error(string.format("%s is not available for %s", key, backend.name))
+	end
+
+	local function open_scope(scope)
+		local function load(cursor)
+			M._debounce(function()
+				catalog.request(snapshot, definition, {
+					scope = scope,
+					query = options.query,
+					cursor = cursor,
+				}, function(page, request_err)
+					if request_err ~= nil then
+						return notify_error(request_err)
+					end
+					local items = vim.deepcopy(page.items)
+					local more = catalog.load_more_entry(page)
+					if more ~= nil then
+						table.insert(items, more)
+					end
+					choose("dbsh " .. definition.title:lower(), items, function(item)
+						if item == nil then
+							return
+						end
+						if item.kind == "more" then
+							return load(item.cursor)
+						end
+						if definition.on_select ~= nil then
+							definition.on_select(item, snapshot)
+						end
+					end)
+				end)
+			end)
+		end
+		load(options.cursor)
+	end
+
+	if options.scope ~= nil then
+		open_scope(options.scope)
+	else
+		choose_scope(snapshot, open_scope)
+	end
 end
 
 -- Asks for the value of a SQL variable. The prompt doubles as the input

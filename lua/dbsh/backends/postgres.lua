@@ -165,10 +165,13 @@ M.queries = {
 -- Deferred require: dbsh.exec requires dbsh.config, which requires the backend
 -- registry, which requires this module. Requiring it at load time would close
 -- that cycle.
-local function fetch(sql, callback)
+local function fetch(sql, request, callback)
 	local exec = require("dbsh.exec")
 	-- Its own slot, so opening a picker never cancels a running user query.
-	exec.run(sql, { mode = "raw", slot = "introspect" }, function(code, stdout, stderr)
+	exec.run(sql, {
+		mode = "raw",
+		slot = "introspect",
+	}, function(code, stdout, stderr)
 		if code ~= 0 then
 			callback(nil, stderr ~= "" and stderr or "psql exited with code " .. tostring(code))
 			return
@@ -188,8 +191,8 @@ function M.kind_label(relkind)
 	return KINDS[relkind] or relkind
 end
 
-local function list_names(sql, callback)
-	fetch(sql, function(rows, err)
+local function list_names(sql, request, callback)
+	fetch(sql, request, function(rows, err)
 		if err ~= nil then
 			callback(nil, err)
 			return
@@ -198,14 +201,12 @@ local function list_names(sql, callback)
 		for _, row in ipairs(rows) do
 			table.insert(items, { value = row[1], display = row[1], ordinal = row[1] })
 		end
-		callback(items, nil)
+		callback({ items = items, next_cursor = nil }, nil)
 	end)
 end
 
--- ctx carries the values already chosen for the levels above. Without a
--- schema this lists every relation, which is what the flat picker does.
-local function list_relations(ctx, callback)
-	fetch(M.queries.tables, function(rows, err)
+local function list_relations(request, callback)
+	fetch(M.queries.tables, request, function(rows, err)
 		if err ~= nil then
 			callback(nil, err)
 			return
@@ -213,47 +214,65 @@ local function list_relations(ctx, callback)
 		local items = {}
 		for _, row in ipairs(rows) do
 			local schema, name, kind = row[1], row[2], row[3]
-			if ctx.schema == nil or ctx.schema == schema then
-				local label = string.format("%s.%s", schema, name)
+			local scope = request.scope or {}
+			if scope.all_schemas or scope.schema == nil or scope.schema == schema then
 				table.insert(items, {
-					value = { schema = schema, name = name, kind = kind },
-					display = string.format("%s  [%s]", label, M.kind_label(kind)),
-					ordinal = label,
+					schema = schema,
+					name = name,
+					kind = kind,
 				})
 			end
 		end
-		callback(items, nil)
+		callback({ items = items, next_cursor = nil }, nil)
 	end)
 end
 
--- The catalog hierarchy, from the top down. Each level says how to list it and
--- what selecting an item does; the user commands are named after `command`.
-M.levels = {
+local function apply_context(key)
+	return function(snapshot, value)
+		return require("dbsh.context").apply(snapshot, key, value, "catalog")
+	end
+end
+
+M.contexts = {
 	{
 		key = "database",
 		command = "Databases",
-		on_select = "set_level",
-		list = function(_, callback)
-			list_names(M.queries.databases, callback)
+		title = "Databases",
+		list = function(request, callback)
+			list_names(M.queries.databases, request, callback)
 		end,
+		apply = apply_context("database"),
 	},
 	{
 		key = "schema",
 		command = "Schemas",
-		on_select = "descend",
-		list = function(_, callback)
-			list_names(M.queries.schemas, callback)
+		title = "Schemas",
+		list = function(request, callback)
+			list_names(M.queries.schemas, request, callback)
 		end,
+		apply = apply_context("schema"),
+	},
+}
+
+local function select_relation(item)
+	local config = require("dbsh.config")
+	require("dbsh").query(M.preview_query(item, config.options().preview_limit))
+end
+
+M.catalogs = {
+	{
+		key = "relations",
+		command = "Relations",
+		title = "Relations",
+		list = list_relations,
+		on_select = select_relation,
 	},
 	{
-		key = "relation",
+		key = "tables",
 		command = "Tables",
+		title = "Tables",
 		list = list_relations,
-		-- Deferred require: dbsh requires the pickers, which reach this leaf.
-		on_select = function(item)
-			local config = require("dbsh.config")
-			require("dbsh").query(M.preview_query(item, config.options().preview_limit))
-		end,
+		on_select = select_relation,
 	},
 }
 

@@ -211,6 +211,13 @@ function M.set_level(bufnr, key, value, origin)
 	return current
 end
 
+function M.apply(snapshot, key, value, origin)
+	if snapshot == nil then
+		return nil, "no current context"
+	end
+	return M.set_level(snapshot.bufnr, key, value, origin)
+end
+
 function M.set_global(connection_name, origin)
 	local previous = vim.deepcopy(state.fallback)
 	local current, err = context_for_profile(connection_name, "fallback", nil, state.fallback)

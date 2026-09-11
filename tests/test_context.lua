@@ -77,6 +77,22 @@ T["changes levels only on the active buffer context"] = function()
 	vim.api.nvim_buf_delete(b, { force = true })
 end
 
+T["applies a context selector to the snapshot owning buffer"] = function()
+	local a = vim.api.nvim_create_buf(false, true)
+	local b = vim.api.nvim_create_buf(false, true)
+	assert(context.bind(a, "local_db", "test"))
+	assert(context.bind(b, "local_db", "test"))
+	local snapshot = context.snapshot(a)
+
+	assert(context.apply(snapshot, "schema", "reporting", "catalog"))
+
+	eq(context.current(a).levels.schema, "reporting")
+	eq(context.current(b).levels.schema, nil)
+
+	vim.api.nvim_buf_delete(a, { force = true })
+	vim.api.nvim_buf_delete(b, { force = true })
+end
+
 T["changes only the fallback through set_global"] = function()
 	local bound = vim.api.nvim_create_buf(false, true)
 	local unbound = vim.api.nvim_create_buf(false, true)

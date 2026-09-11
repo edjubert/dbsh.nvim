@@ -11,6 +11,7 @@ local defaults = {
 	connect_timeout = 5,
 	query_timeout = 30000,
 	preview_limit = 10,
+	catalog_page_size = 200,
 	csv_delimiter = ",",
 	export_dir = vim.fs.joinpath(vim.fn.stdpath("data"), "dbsh", "exports"),
 	results_split = "horizontal",
@@ -24,6 +25,15 @@ M.state = {
 
 function M.setup(opts)
 	M.state.opts = vim.tbl_deep_extend("force", vim.deepcopy(defaults), opts or {})
+	if type(M.state.opts.catalog_page_size) ~= "number"
+		or M.state.opts.catalog_page_size <= 0
+		or M.state.opts.catalog_page_size ~= math.floor(M.state.opts.catalog_page_size) then
+		vim.notify(
+			"dbsh.nvim: catalog_page_size must be a positive integer; using 200",
+			vim.log.levels.WARN
+		)
+		M.state.opts.catalog_page_size = defaults.catalog_page_size
+	end
 end
 
 function M.options()
