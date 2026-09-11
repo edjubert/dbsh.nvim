@@ -164,6 +164,81 @@ T["refuses an empty query"] = function()
 	expect_match(notified, "empty")
 end
 
+T["confirms a mutating query before it resolves and runs"] = function()
+	local original_select = vim.ui.select
+	local captured
+	local ran = false
+	vim.ui.select = function(items, opts, callback)
+		captured = { items = items, opts = opts }
+		callback("Run")
+	end
+	exec.runner = function(_, _, callback)
+		ran = true
+		vim.schedule(function()
+			callback({ code = 0, stdout = "DELETE 1", stderr = "" })
+		end)
+		return { kill = function() end }
+	end
+
+	dbsh.query("DELETE FROM users;")
+	vim.wait(500, function() return ran end)
+
+	vim.ui.select = original_select
+	eq(captured.items, { "Run", "Cancel" })
+	expect_match(captured.opts.prompt, "mutation")
+	eq(ran, true)
+end
+
+T["does not resolve variables or run after confirmation is cancelled"] = function()
+	local resolve = require("dbsh.resolve")
+	local original_preamble, original_select = resolve.preamble, vim.ui.select
+	local preambles, ran = 0, false
+	resolve.preamble = function()
+		preambles = preambles + 1
+	end
+	vim.ui.select = function(_, _, callback) callback("Cancel") end
+	exec.runner = function()
+		ran = true
+		return { kill = function() end }
+	end
+
+	dbsh.query("DELETE FROM :raw_data;")
+	vim.wait(100, function() return ran end)
+
+	vim.ui.select = original_select
+	resolve.preamble = original_preamble
+	eq(preambles, 0)
+	eq(ran, false)
+end
+
+T["runs directly when safety is off"] = function()
+	dbsh.setup({
+		connections = {
+			local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
+		},
+		default = "local_db",
+		safety = { mode = "off" },
+	})
+	local original_select = vim.ui.select
+	local ran = false
+	vim.ui.select = function()
+		error("safety off must not prompt")
+	end
+	exec.runner = function(_, _, callback)
+		ran = true
+		vim.schedule(function()
+			callback({ code = 0, stdout = "DELETE 1", stderr = "" })
+		end)
+		return { kill = function() end }
+	end
+
+	dbsh.query("DELETE FROM users;")
+	vim.wait(500, function() return ran end)
+
+	vim.ui.select = original_select
+	eq(ran, true)
+end
+
 T["renders successful output in the result buffer"] = function()
 	local snapshot = context.snapshot(0)
 	exec.runner = function(_, _, on_exit)
@@ -420,6 +495,13 @@ T["refreshes the schema cache after a successful query"] = function()
 end
 
 T["does not refresh the schema cache when the query fails"] = function()
+	dbsh.setup({
+		connections = {
+			local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
+		},
+		default = "local_db",
+		safety = { mode = "off" },
+	})
 	local lsp = require("dbsh.lsp")
 	local original = lsp.invalidate_external
 	local calls = 0

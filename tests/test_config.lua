@@ -26,6 +26,24 @@ T["applies default options"] = function()
 	eq(config.options().query_timeout, 30000)
 	eq(config.options().preview_limit, 10)
 	eq(config.options().catalog_page_size, 200)
+	eq(config.options().safety.mode, "confirm")
+end
+
+T["allows safety confirmations to be disabled"] = function()
+	config.setup({ connections = {}, safety = { mode = "off" } })
+	eq(config.options().safety.mode, "off")
+end
+
+T["falls back from an invalid safety mode with a clear warning"] = function()
+	local original_notify = vim.notify
+	local notified
+	vim.notify = function(message) notified = message end
+
+	config.setup({ connections = {}, safety = { mode = "always" } })
+
+	vim.notify = original_notify
+	eq(config.options().safety.mode, "confirm")
+	expect_match(notified, "safety.mode")
 end
 
 T["accepts a positive catalog page size"] = function()

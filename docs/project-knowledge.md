@@ -1,81 +1,92 @@
 # Connaissances projet
 
-Ce document consolide les conventions du dépôt, aujourd'hui lisibles seulement dans le code.
-Il décrit le plugin tel qu'il est, et servira de référence aux chantiers à venir.
-
-## Ce que fait le plugin
-
-dbsh.nvim pilote un shell de base de données en sous-processus depuis un buffer Neovim.
-Le shell est une propriété de la connexion : aujourd'hui c'est `psql`, piloté par le backend `postgres`.
-Il ne contient aucun driver : la connexion, l'authentification et le rendu du tableau sont délégués au CLI.
-Ses modules vivent sous `lua/dbsh/`, ses messages utilisateur sont préfixés `dbsh.nvim: `, ses données sous `stdpath("data")/dbsh/`.
+Ce document décrit les contrats actuels de dbsh.nvim. Le plugin pilote un CLI de
+base de données depuis Neovim ; il ne contient pas de driver. Les modules vivent
+sous `lua/dbsh/`, les messages utilisateur commencent par `dbsh.nvim: ` et les
+données persistantes vivent sous `stdpath("data")/dbsh/`.
 
 ## Backends
 
-Un backend est une table de données et de fonctions, **sans état**, sous `lua/dbsh/backends/<nom>.lua`, enregistrée dans `lua/dbsh/backends/init.lua`.
-Il déclare `name`, `shape`, `filetype`, `extension`, `table_border`, `argv`, `env`, `preamble`, `parse_raw`, `variable_preamble`, `export_query`, `preview_query`, `levels`, et éventuellement `lsp`.
-`lsp` est **optionnel** : `{ client_name, invalidate_command, settings(conn, options) }`, le serveur de langage que dbsh pilote pour ce backend.
-Un backend qui ne le déclare pas fait sortir `dbsh.lsp` immédiatement, sans erreur.
-`settings` reste libre de forme — chaque serveur nomme ses propres réglages — et ne contient **jamais** de mot de passe : dbsh ne transporte aucun secret.
-**La dépendance ne va que dans un sens** : `config` requiert le registre, un backend ne requiert jamais `config`, et les fonctions qui ont besoin d'une valeur de configuration la reçoivent en paramètre (`env(conn, options)`, `preview_query(item, limit)`).
-`levels[].list` a besoin d'`exec` et fait donc son `require` **dans le corps** de la fonction.
+Un backend est une table sans état sous `lua/dbsh/backends/<nom>.lua`, enregistrée
+dans `lua/dbsh/backends/init.lua`. Il déclare notamment `argv`, `env`, `preamble`,
+`parse_raw`, `variable_preamble`, `export_query`, `preview_query`, les contrats
+`contexts` et `catalogs`, et éventuellement `definition_request` et `lsp`.
 
-## Navigation
+`contexts` représente les changements de contexte persistés dans le buffer
+actif ; `catalogs` représente les objets à parcourir. Un catalogue expose
+`key`, `command`, `title`, `list(request, callback)` et ses actions. Son
+`request` contient un contexte **public**, une portée, un filtre littéral, un
+curseur opaque et une limite. La pagination reste côté backend : aucune couche
+partagée ne filtre ni ne récupère toutes les pages en mémoire.
 
-La hiérarchie de catalogue est la liste `backend.levels` ; chaque niveau porte `key`, `command`, `list(ctx, callback)` et `on_select` (`"set_level"`, `"descend"`, ou une fonction).
-Les commandes `:Db<command>` sont générées depuis cette liste par `dbsh.init` et redéclarées sur l'évènement `User DbshConnectionChanged`.
-`dbsh.lsp` s'accroche au même évènement pour repointer le serveur de langage, et à `LspAttach` pour le cas inverse — un client qui attache après le dernier changement de connexion.
+Un backend ne requiert jamais `config`, `definitions` ou l’état global. Les
+valeurs nécessaires lui sont passées en argument. Les accès à `exec` depuis un
+backend sont différés pour éviter le cycle avec le registre de backends.
 
-## Runtime
+## Contextes, résultats et définitions
 
-Neovim ≥ 0.10, LuaJIT (Lua 5.1) : pas de `goto`, pas d'opérateurs bitwise, `unpack` et non `table.unpack`.
-Les sous-processus passent par `vim.system`.
-telescope.nvim est une dépendance **optionnelle** : tout chemin qui l'utilise passe par `pcall(require, "telescope")` et dégrade avec un message clair.
+`config.lua` contient les options et profils déclarés immuables.
+`context.lua` porte les contextes d’exécution : un fallback pour les buffers non
+liés et un contexte indépendant par buffer/scratchpad. Un snapshot est copié
+avant chaque requête, catalogue, résultat ou définition ; `generation` empêche
+un callback tardif d’écraser un contexte modifié.
 
-## Forme d'un module
+`results.lua` garde un buffer `__DBSH__` par session. `definitions.lua` garde un
+buffer DDL par identité publique d’objet : backend, empreinte publique de la
+connexion, niveaux effectifs, type et OID (ou nom qualifié). Ni mot de passe,
+ni chaîne de connexion brute, ni SQL ne sont présents dans cette clé.
 
-`local M = {}` en tête, `return M` en pied ; fonctions publiques `function M.x()`, helpers `local function`.
-Les `require` de tête sont en haut du fichier, sauf en cas de cycle où le `require` est fait dans le corps de la fonction (`init` ↔ `telescope/pickers`, `resolve` → `pickers`).
+Les définitions conservent le snapshot capturé à l’ouverture. Le slot
+`definition` d’`exec.lua` utilise donc ce contexte même si l’utilisateur change
+ensuite de connexion dans un autre buffer. Ouvrir une nouvelle définition depuis
+un buffer de définition crée un split au lieu de remplacer le DDL visible.
 
-## Style
+## Exécution et sécurité
 
-Tabulations pour l'indentation, aucun formateur configuré.
-Commentaires et identifiants en anglais.
-**Un commentaire explique pourquoi, jamais quoi** — par exemple, dans `backends/postgres.lua` : `-X ignores ~/.psqlrc, -w never prompts for a password`.
+`exec.lua` possède des slots par session : `user`, `introspect` et `definition`.
+`run` écrit un script SQL temporaire ; `run_argv` exécute un argv fourni par un
+backend, sans script temporaire ni journalisation des arguments/environnements.
 
-## Gestion d'erreur
+`safety.lua` est pur et ne dépend pas de l’UI. Son classifieur est volontairement
+conservateur : lectures connues exécutées directement, mutations/privilèges,
+entrées ambiguës et multi-statements confirmés par défaut. C’est un garde-fou
+ergonomique, jamais une frontière de sécurité : les permissions de la base
+restent la source d’autorité. `dbsh.query` confirme avant la résolution des
+variables, puis exécute avec le snapshot déjà capturé.
 
-Jamais d'`error()` sur un chemin utilisateur.
-Synchrones : `return nil, err`.
-Asynchrones : `callback(nil, err)` pour l'introspection et l'export, `callback(code, stdout, stderr)` pour `exec.run`.
-Les messages utilisateur passent par `vim.notify` et sont préfixés `dbsh.nvim: `.
-Un store JSON corrompu ou absent est traité comme vide et ne fait jamais échouer une requête (cf. `history.load`).
+## Commandes et UI
 
-## État
+`init.lua` déclare les commandes génériques et l’union des commandes
+`backend.contexts`/`backend.catalogs`. Leur exécution est vérifiée contre le
+backend du buffer actif. `telescope/pickers.lua` est générique : connexion,
+scratchpad, contexte, catalogue et définitions. Telescope est optionnel ; les
+chemins concernés dégradent vers une UI Neovim ou une erreur explicite.
 
-L'état vit dans deux modules et nulle part ailleurs : `config.state` (connexions déclarées, connexion courante, `generation`) et `exec.slots` (un processus en vol par slot, `user` et `introspect`).
-Le compteur `generation` est une garde d'annulation : un résultat qui revient après un changement de connexion est jeté.
-`config.backend()` résout le backend de la connexion courante ; `config.set_level(key, value)` fixe un niveau de navigation (par exemple `database`) sans toucher aux connexions déclarées.
-`set_connection` et `set_level` incrémentent tous deux `generation` et émettent `User DbshConnectionChanged` : tout ce qui dépend de la connexion courante s'accroche à cet évènement.
+`DbTables` est le contrat de compatibilité PostgreSQL ; `DbRelations` est le
+parcours de relations canonique. Ne pas réintroduire `backend.levels` ni une
+navigation globale.
 
 ## Persistance
 
-Tout ce qui persiste vit sous `vim.fn.stdpath("data")/dbsh/` : `exports/` (CSV), `vars/<connexion>.json` (historique des variables), `<connexion>.sql` (scratchpad).
-`vim.fn.mkdir(dir, "p")` avant toute écriture.
+Les exports CSV, historiques de variables et métadonnées/fichiers de scratchpad
+sont sous `stdpath("data")/dbsh/`. Toujours créer le répertoire parent avec
+`vim.fn.mkdir(dir, "p")` avant une écriture. Les secrets ne sont jamais copiés
+dans cette persistance.
 
-## Tests
+## Style, erreurs et tests
 
-MiniTest, lancés par `make test` (`nvim --headless --noplugin -u tests/minimal_init.lua -c "lua MiniTest.run()"`).
-Un fichier par module de production, nommé `tests/test_<module>.lua`, commençant par `local helpers = dofile("tests/helpers.lua")` — `require()` ne cherche que dans `lua/`.
-Assertions : `helpers.eq`, `helpers.neq`, `helpers.expect_match`.
-Setup/teardown via `MiniTest.new_set({ hooks = { pre_case = ..., post_case = ... } })`.
-Un test asynchrone attend avec `vim.wait(500, function() return got ~= nil end)`.
+Neovim ≥ 0.10 et LuaJIT/Lua 5.1 : pas de `goto` ni opérateurs bitwise.
+Indentation par tabulations. Les commentaires expliquent le pourquoi, les
+identifiants et commentaires de code restent en anglais.
 
-## Points d'injection
+Pas d’`error()` sur un chemin utilisateur. Les chemins synchrones retournent
+`nil, err`; les chemins asynchrones suivent le contrat de leur module. Les
+notifications passent par `vim.notify` avec le préfixe standard.
 
-Pas de framework de mock, l'injection se fait par champ de module réassignable : `exec.runner` (par défaut `vim.system`, remplacé par un faux runner qui appelle `on_exit` immédiatement), `pickers._telescope()` (renvoie `nil` pour simuler telescope absent), `lsp._clients` et `lsp._buffers` (remplacés par de faux clients LSP enregistrant `notify` et `request`).
-Un test qui les remplace les restaure en `post_case`.
+Les tests MiniTest se lancent avec `make test`. Utiliser un fichier
+`tests/test_<module>.lua`, `tests/helpers.lua`, et `vim.wait` pour l’asynchrone.
+Les coutures de test sont des champs réassignables : `exec.runner`,
+`pickers._telescope`, les tables LSP, et les modules purs (`safety.classify`,
+constructeurs de requêtes backend). Restaurer toute injection dans les hooks.
 
-## Commits
-
-Conventional commits, en anglais.
+Les commits suivent Conventional Commits, en anglais.
