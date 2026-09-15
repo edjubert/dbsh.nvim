@@ -207,4 +207,117 @@ T["reports a failed outcome with its message"] = function()
 	eq(calls[2].level, vim.log.levels.WARN)
 end
 
+local function scratch_window()
+	local buf = vim.api.nvim_create_buf(false, true)
+	local win = vim.api.nvim_open_win(buf, false, {
+		relative = "editor",
+		style = "minimal",
+		width = 40,
+		height = 5,
+		row = 1,
+		col = 1,
+	})
+	return win
+end
+
+T["decorates the resolved window and restores it"] = function()
+	local win = scratch_window()
+	vim.wo[win].winbar = "ORIGINAL"
+
+	local id = progress.start({
+		title = "heimdall",
+		summary = "SELECT 1",
+		window = function() return win end,
+	})
+	now = now + 400
+	progress.tick()
+	expect_match(vim.wo[win].winbar, "executing SELECT 1")
+
+	progress.finish(id, { ok = true })
+	eq(vim.wo[win].winbar, "ORIGINAL")
+
+	vim.api.nvim_win_close(win, true)
+end
+
+T["escapes percent signs in the winbar"] = function()
+	local win = scratch_window()
+
+	local id = progress.start({
+		title = "heimdall",
+		summary = "SELECT * FROM t WHERE name LIKE '%foo%'",
+		window = function() return win end,
+	})
+	now = now + 400
+	progress.tick()
+	expect_match(vim.wo[win].winbar, "LIKE '%%%%foo%%%%'")
+
+	progress.finish(id, { ok = true })
+	vim.api.nvim_win_close(win, true)
+end
+
+T["decorates a window that only appears later"] = function()
+	local win
+	local id = progress.start({
+		title = "heimdall",
+		summary = "SELECT 1",
+		window = function() return win end,
+	})
+
+	now = now + 400
+	progress.tick()
+
+	win = scratch_window()
+	now = now + 100
+	progress.tick()
+	expect_match(vim.wo[win].winbar, "executing SELECT 1")
+
+	progress.finish(id, { ok = true })
+	eq(vim.wo[win].winbar, "")
+	vim.api.nvim_win_close(win, true)
+end
+
+T["leaves a third-party winbar alone"] = function()
+	local win = scratch_window()
+	vim.wo[win].winbar = "ORIGINAL"
+
+	local id = progress.start({
+		title = "heimdall",
+		summary = "SELECT 1",
+		window = function() return win end,
+	})
+	now = now + 400
+	progress.tick()
+	vim.wo[win].winbar = "SOMEONE ELSE"
+
+	progress.finish(id, { ok = true })
+	eq(vim.wo[win].winbar, "SOMEONE ELSE")
+
+	vim.api.nvim_win_close(win, true)
+end
+
+T["survives a window closed mid-flight and a throwing resolver"] = function()
+	local win = scratch_window()
+	local id = progress.start({
+		title = "heimdall",
+		summary = "SELECT 1",
+		window = function() return win end,
+	})
+	now = now + 400
+	progress.tick()
+	vim.api.nvim_win_close(win, true)
+	now = now + 100
+	progress.tick()
+	progress.finish(id, { ok = true })
+
+	local other = progress.start({
+		title = "heimdall",
+		summary = "SELECT 2",
+		window = function() error("resolver exploded") end,
+	})
+	now = now + 400
+	progress.tick()
+	expect_match(progress.state.operations[other].rendered, "SELECT 2")
+	progress.finish(other, { ok = true })
+end
+
 return T
