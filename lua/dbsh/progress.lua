@@ -8,6 +8,10 @@ local M = {}
 local SPINNER = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }
 local FRAME_MS = 100
 local SAFE_OPTIONS = { enabled = false, delay_ms = 300, summary_width = 60 }
+local HL_GROUP = "DbshProgress"
+
+-- default = true: a colorscheme or the user keeps the last word.
+vim.api.nvim_set_hl(0, HL_GROUP, { link = "Comment", default = true })
 
 -- Injection points: this repo has no mock framework, tests reassign these.
 M.clock = function()
@@ -87,6 +91,44 @@ local function ensure_timer()
 	end))
 end
 
+-- winbar is a statusline format string: a bare % in the SQL would be read as a
+-- format item and corrupt the line.
+local function decorate(text)
+	return "%#" .. HL_GROUP .. "# " .. (text:gsub("%%", "%%%%"))
+end
+
+local function restore_winbar(operation)
+	local win = operation.decorated_win
+	operation.decorated_win = nil
+	if win == nil or not vim.api.nvim_win_is_valid(win) then
+		return
+	end
+	-- Someone wrote over us: leave their winbar alone.
+	if vim.wo[win].winbar ~= operation.rendered_winbar then
+		return
+	end
+	vim.wo[win].winbar = operation.saved_winbar or ""
+end
+
+local function update_winbar(operation, text)
+	if operation.window == nil then
+		return
+	end
+	-- The resolver comes from outside this module and may throw.
+	local ok, win = pcall(operation.window)
+	if not ok or type(win) ~= "number" or not vim.api.nvim_win_is_valid(win) then
+		restore_winbar(operation)
+		return
+	end
+	if operation.decorated_win ~= win then
+		restore_winbar(operation)
+		operation.decorated_win = win
+		operation.saved_winbar = vim.wo[win].winbar
+	end
+	operation.rendered_winbar = decorate(text)
+	vim.wo[win].winbar = operation.rendered_winbar
+end
+
 -- The title is dropped by native vim.notify, so the body carries the connection
 -- name until we know the notifier can replace a bubble.
 local function notification_body(operation, text)
@@ -164,6 +206,9 @@ function M.start(spec)
 		rendered = nil,
 		notification = nil,
 		notified = false,
+		decorated_win = nil,
+		saved_winbar = nil,
+		rendered_winbar = nil,
 	}
 	ensure_timer()
 	return id
@@ -183,6 +228,7 @@ function M.finish(id, outcome)
 		return
 	end
 	M.state.operations[id] = nil
+	restore_winbar(operation)
 	close_notification(operation, outcome or {})
 	if next(M.state.operations) == nil then
 		stop_timer()
@@ -210,6 +256,7 @@ function M.tick()
 				operation.summary,
 				M.elapsed_text(elapsed)
 			)
+			update_winbar(operation, operation.rendered)
 			update_notification(operation, operation.rendered)
 		end
 	end
