@@ -206,17 +206,36 @@ local function create(snapshot, object, request, key)
 	return record
 end
 
+-- record.label is the public qualified name already shown in the buffer name.
+-- The argv must never reach the indicator: it can carry a keychain path.
+local function progress_spec(record)
+	return {
+		summary = record.label,
+		label = "loading",
+		window = function()
+			return M.find_win(record.bufnr)
+		end,
+	}
+end
+
 local function execute(record, request, callback)
 	if request.kind == "sql" then
 		exec.run(request.sql, {
 			context = record.execution_snapshot,
 			mode = "raw",
 			slot = "definition",
+			progress = progress_spec(record),
 		}, callback)
 		return
 	end
 	if request.kind == "argv" then
-		exec.run_argv(record.execution_snapshot, request, callback)
+		-- A shallow copy: record.request is kept for refreshes and must not
+		-- gain a closure.
+		exec.run_argv(
+			record.execution_snapshot,
+			vim.tbl_extend("force", request, { progress = progress_spec(record) }),
+			callback
+		)
 		return
 	end
 	callback(1, "", "definition request is malformed")

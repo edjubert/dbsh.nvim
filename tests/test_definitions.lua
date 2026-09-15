@@ -164,4 +164,43 @@ T["toggles the current definition and closes only the active session definitions
 	eq(definitions.find_win(b.bufnr) ~= nil, true)
 end
 
+T["labels a definition request for the indicator"] = function()
+	successful_runner()
+	local captured
+	local original_run, original_run_argv = exec.run, exec.run_argv
+	exec.run = function(_, opts, _)
+		captured = opts.progress
+	end
+	exec.run_argv = function(_, request, _)
+		captured = request.progress
+	end
+
+	local record = assert(definitions.open(snapshots.a, relation(42)))
+
+	exec.run, exec.run_argv = original_run, original_run_argv
+	eq(captured.summary, record.label)
+	eq(captured.label, "loading")
+	eq(type(captured.window), "function")
+	eq(captured.window(), definitions.find_win(record.bufnr))
+end
+
+T["never puts the definition argv in the indicator"] = function()
+	successful_runner()
+	local captured
+	local original_run, original_run_argv = exec.run, exec.run_argv
+	exec.run = function(_, opts, _)
+		captured = opts.progress
+	end
+	exec.run_argv = function(_, request, _)
+		captured = request.progress
+	end
+
+	local record = assert(definitions.open(snapshots.a, relation(42)))
+
+	exec.run, exec.run_argv = original_run, original_run_argv
+	eq(captured.summary:find("pg_dump"), nil)
+	eq(captured.summary:find("%-%-"), nil)
+	eq(record.request.progress, nil)
+end
+
 return T
