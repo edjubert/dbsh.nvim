@@ -738,4 +738,25 @@ T["routes LSP context, attach, and buffer lifecycle by mode"] = function()
 	vim.api.nvim_buf_delete(buf, { force = true })
 end
 
+T["reports query progress with the user SQL and the results window"] = function()
+	local captured
+	local original_run = exec.run
+	exec.run = function(_, opts, _)
+		captured = opts.progress
+	end
+
+	dbsh.query("SELECT 1;")
+	vim.wait(200, function() return captured ~= nil end)
+
+	exec.run = original_run
+	eq(captured.summary, "SELECT 1;")
+	eq(type(captured.window), "function")
+	eq(captured.window() ~= nil, true)
+end
+
+T["clears the progress registry when Neovim exits"] = function()
+	local autocmds = vim.api.nvim_get_autocmds({ group = "dbsh", event = "VimLeavePre" })
+	eq(#autocmds, 3)
+end
+
 return T

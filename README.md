@@ -187,6 +187,11 @@ require("dbsh").setup({
 	results_split = "horizontal",
 	variable_patterns = {}, -- e.g. { ":(raw_data)" }, see SQL variables below
 	safety = { mode = "confirm" }, -- "confirm" or "off"
+	progress = {
+		enabled = true,
+		delay_ms = 300,
+		summary_width = 60,
+	},
 	lsp = {
 		mode = "off", -- "off", "external", or "managed"; see below
 	},
@@ -207,6 +212,7 @@ require("dbsh").setup({
 | `results_split` | `"horizontal"` | `"horizontal"`, `"vertical"` or `"float"`: which window opens `__DBSH__` in. Only applies the first time the window is created; combine with `vim.opt.splitright = true` for a right-hand split. `"float"` is styled after your telescope config, when installed. |
 | `variable_patterns` | `{}` | Lua patterns (one capture each) naming SQL variables to prompt for. See [SQL variables](#sql-variables). |
 | `safety` | `{ mode = "confirm" }` | Confirms mutating or ambiguous SQL. Use `{ mode = "off" }` to disable the ergonomic guardrail. |
+| `progress` | `{ enabled = true, delay_ms = 300, summary_width = 60 }` | Reports operations while they run. `delay_ms` is how long dbsh waits before displaying anything; `0` displays immediately. `summary_width` truncates the SQL excerpt. See [Progress indicator](#progress-indicator). |
 | `lsp` | `{ mode = "off" }` | Disable PgLS by default. Choose `external` for a user-owned client or `managed` for dbsh-owned PostgreSQL clients. |
 
 There is deliberately no password field required for SQL execution. `psql`
@@ -476,6 +482,38 @@ Three ways to send SQL, none of which need a precise selection:
 
 While a query runs, the result buffer shows a `# Running...` placeholder, and
 `:DbCancel` kills the process.
+
+### Progress indicator
+
+Every operation dbsh starts is reported while it runs: user queries, catalog
+pages opened from a picker, CSV exports, and definition buffers. Two surfaces
+carry it.
+
+- The **winbar** of the window that will hold the output — the `__DBSH__` result
+  window for a query, the DDL buffer window for a definition.
+- A **notification** titled with the connection name. This is what covers catalog
+  requests, which feed a Telescope picker rather than a window of their own.
+
+```
+⠹ executing SELECT * FROM public.users WHERE…  12s
+```
+
+The indicator is armed before the backend prepares its runtime, so it also covers
+a Snowflake password command and its SSO round trip — usually the longest wait in
+a session. When dbsh retries after a rejected credential, the indicator is
+relabelled `re-authenticating` rather than restarted: the clock keeps running, so
+a doubled wait is visible rather than silent.
+
+Nothing is displayed during the first `progress.delay_ms` (300 ms by default). A
+catalog page that returns in 80 ms should not flash an indicator nobody had time
+to read. Set `delay_ms = 0` to display immediately, or
+`progress = { enabled = false }` to turn the whole thing off.
+
+With `nvim-notify`, `Snacks.notifier` or Noice installed, one notification is
+replaced in place until the operation ends. Plain `vim.notify` cannot replace a
+notification, so dbsh degrades to two messages: one when the operation crosses
+the delay, one when it ends. The winbar animates either way. No notification
+plugin is required.
 
 ### Query safety
 

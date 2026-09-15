@@ -3,6 +3,7 @@
 local config = require("dbsh.config")
 local backends = require("dbsh.backends")
 local credentials = require("dbsh.credentials")
+local progress = require("dbsh.progress")
 local context = require("dbsh.context")
 local exec = require("dbsh.exec")
 local results = require("dbsh.results")
@@ -41,7 +42,18 @@ local function run_query(sql, snapshot)
 
 		local split_opts = { split = config.options().results_split }
 		results.running(snapshot, sql, split_opts)
-		exec.run(preamble .. sql, { context = snapshot }, function(code, stdout, stderr)
+		exec.run(preamble .. sql, {
+			context = snapshot,
+			progress = {
+				-- The user SQL, not preamble .. sql: the variable preamble has
+				-- no place in an indicator.
+				summary = sql,
+				window = function()
+					local buf = results.find_buf(snapshot)
+					return buf and results.find_win(buf) or nil
+				end,
+			},
+		}, function(code, stdout, stderr)
 			local output = stdout
 			if code ~= 0 then
 				output = stderr ~= "" and stderr or stdout
@@ -383,6 +395,13 @@ function M.setup(opts)
 		group = group,
 		callback = function()
 			credentials.clear()
+		end,
+	})
+
+	vim.api.nvim_create_autocmd("VimLeavePre", {
+		group = group,
+		callback = function()
+			progress.stop_all()
 		end,
 	})
 end

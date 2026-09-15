@@ -239,4 +239,35 @@ T["falls back from invalid LSP options without exposing the input table"] = func
 	end
 end
 
+T["applies default progress options"] = function()
+	config.setup({ connections = {} })
+	eq(config.options().progress.enabled, true)
+	eq(config.options().progress.delay_ms, 300)
+	eq(config.options().progress.summary_width, 60)
+end
+
+T["accepts an immediate progress delay"] = function()
+	config.setup({ connections = {}, progress = { delay_ms = 0 } })
+	eq(config.options().progress.delay_ms, 0)
+	eq(config.options().progress.enabled, true)
+end
+
+T["accepts disabling progress"] = function()
+	config.setup({ connections = {}, progress = { enabled = false } })
+	eq(config.options().progress.enabled, false)
+end
+
+T["falls back from an invalid progress table with a clear warning"] = function()
+	local original_notify = vim.notify
+	local notified
+	vim.notify = function(message) notified = message end
+
+	config.setup({ connections = {}, progress = { delay_ms = -1 } })
+
+	vim.notify = original_notify
+	eq(config.options().progress.delay_ms, 300)
+	eq(config.options().progress.summary_width, 60)
+	expect_match(notified, "progress")
+end
+
 return T
