@@ -55,7 +55,13 @@ function M.run(sql, path, preamble, callback, snapshot)
 
 	local query = backend.export_query(sql, config.options().csv_delimiter)
 	-- Raw mode: no decoration, so stdout is the CSV itself.
-	exec.run((preamble or "") .. query, { mode = "raw", context = snapshot }, function(code, stdout, stderr)
+	exec.run((preamble or "") .. query, {
+		mode = "raw",
+		context = snapshot,
+		-- The user query, not the COPY wrapper the backend built around it.
+		-- Exports never open the result buffer.
+		progress = { summary = sql, label = "exporting" },
+	}, function(code, stdout, stderr)
 		if code ~= 0 then
 			callback(nil, stderr ~= "" and stderr or "the query exited with code " .. tostring(code))
 			return

@@ -190,4 +190,18 @@ T["exports the query belonging to the displayed result session"] = function()
 	eq(captured.snapshot.id, snapshot_b.id)
 end
 
+T["shows the user query rather than the export query while running"] = function()
+	local captured
+	local original_run = exec.run
+	exec.run = function(_, opts, _)
+		captured = opts.progress
+	end
+
+	export.run("SELECT 1;", vim.fs.joinpath(tmpdir, "out.csv"), nil, function() end)
+
+	exec.run = original_run
+	eq(captured.summary, "SELECT 1;")
+	eq(captured.window, nil)
+end
+
 return T
