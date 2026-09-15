@@ -30,6 +30,7 @@ local T = MiniTest.new_set({
 		pre_case = function()
 			config.setup({ connections = {} })
 			progress.stop_all()
+			progress.state.replaceable = nil
 			now = 1000
 			timers = {}
 			original_clock = progress.clock
@@ -118,6 +119,92 @@ T["stop_all empties the registry"] = function()
 	progress.stop_all()
 	eq(next(progress.state.operations), nil)
 	eq(timers[1].closed, true)
+end
+
+T["replaces a single bubble when the notifier supports it"] = function()
+	local original_notify = vim.notify
+	local calls = {}
+	vim.notify = function(message, level, opts)
+		table.insert(calls, { message = message, level = level, opts = opts or {} })
+		return { record = #calls }
+	end
+
+	local id = progress.start({ title = "heimdall", summary = "SELECT 1" })
+	now = now + 400
+	progress.tick()
+	now = now + 100
+	progress.tick()
+	progress.finish(id, { ok = true })
+
+	vim.notify = original_notify
+	eq(#calls, 3)
+	expect_match(calls[1].message, "dbsh.nvim: heimdall — .*executing SELECT 1")
+	eq(calls[1].opts.timeout, false)
+	eq(calls[1].opts.replace, nil)
+	eq(calls[2].opts.replace ~= nil, true)
+	eq(calls[2].message:find("dbsh.nvim") == nil, true)
+	expect_match(calls[3].message, "done in 0s")
+	eq(calls[3].opts.timeout, nil)
+end
+
+T["emits exactly two dry notifications without a capable notifier"] = function()
+	local original_notify = vim.notify
+	local calls = {}
+	vim.notify = function(message, level, opts)
+		table.insert(calls, { message = message, level = level, opts = opts or {} })
+		return nil
+	end
+
+	local id = progress.start({ title = "heimdall", summary = "SELECT 1" })
+	now = now + 400
+	progress.tick()
+	now = now + 100
+	progress.tick()
+	now = now + 100
+	progress.tick()
+	progress.finish(id, { ok = true })
+
+	vim.notify = original_notify
+	eq(#calls, 2)
+	expect_match(calls[1].message, "dbsh.nvim: heimdall — .*executing SELECT 1")
+	expect_match(calls[2].message, "dbsh.nvim: heimdall — done in 0s")
+end
+
+T["stays silent for an operation that never reached the delay"] = function()
+	local original_notify = vim.notify
+	local calls = 0
+	vim.notify = function()
+		calls = calls + 1
+		return nil
+	end
+
+	local id = progress.start({ title = "heimdall", summary = "SELECT 1" })
+	now = now + 80
+	progress.tick()
+	progress.finish(id, { ok = true })
+
+	vim.notify = original_notify
+	eq(calls, 0)
+end
+
+T["reports a failed outcome with its message"] = function()
+	local original_notify = vim.notify
+	local calls = {}
+	vim.notify = function(message, level, opts)
+		table.insert(calls, { message = message, level = level, opts = opts or {} })
+		return nil
+	end
+
+	local id = progress.start({ title = "heimdall", summary = "SELECT 1" })
+	now = now + 400
+	progress.tick()
+	now = now + 2000
+	progress.finish(id, { ok = false, message = "cancelled" })
+
+	vim.notify = original_notify
+	eq(#calls, 2)
+	expect_match(calls[2].message, "cancelled after 2s")
+	eq(calls[2].level, vim.log.levels.WARN)
 end
 
 return T
