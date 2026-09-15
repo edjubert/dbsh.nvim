@@ -13,6 +13,13 @@ local defaults = {
 	preview_limit = 10,
 	catalog_page_size = 200,
 	credentials = { cache_ttl_ms = 900000 },
+	-- Reports in-flight CLI operations. delay_ms keeps fast catalog requests
+	-- from flashing an indicator nobody had time to read.
+	progress = {
+		enabled = true,
+		delay_ms = 300,
+		summary_width = 60,
+	},
 	csv_delimiter = ",",
 	export_dir = vim.fs.joinpath(vim.fn.stdpath("data"), "dbsh", "exports"),
 	results_split = "horizontal",
@@ -54,6 +61,15 @@ end
 local function valid_positive_finite_integer(value)
 	return type(value) == "number"
 		and value > 0
+		and value < math.huge
+		and value == math.floor(value)
+end
+
+-- delay_ms accepts 0, which means "show immediately"; the positive variant
+-- above would reject it.
+local function valid_non_negative_integer(value)
+	return type(value) == "number"
+		and value >= 0
 		and value < math.huge
 		and value == math.floor(value)
 end
@@ -128,6 +144,13 @@ function M.setup(opts)
 		or not valid_positive_finite_integer(M.state.opts.credentials.cache_ttl_ms) then
 		warn("credentials.cache_ttl_ms must be a positive integer; using 900000")
 		M.state.opts.credentials = vim.deepcopy(defaults.credentials)
+	end
+	if type(M.state.opts.progress) ~= "table"
+		or type(M.state.opts.progress.enabled) ~= "boolean"
+		or not valid_non_negative_integer(M.state.opts.progress.delay_ms)
+		or not valid_positive_finite_integer(M.state.opts.progress.summary_width) then
+		warn("progress must be { enabled = boolean, delay_ms = non-negative integer, summary_width = positive integer }; using the defaults")
+		M.state.opts.progress = vim.deepcopy(defaults.progress)
 	end
 	if type(M.state.opts.safety) ~= "table"
 		or (M.state.opts.safety.mode ~= "confirm" and M.state.opts.safety.mode ~= "off") then
