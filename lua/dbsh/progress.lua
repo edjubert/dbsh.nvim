@@ -22,6 +22,9 @@ M.state = {
 	operations = {},
 	next_id = 1,
 	timer = nil,
+	-- nil until the first notification tells us whether the notifier can
+	-- replace a bubble. Native vim.notify cannot.
+	replaceable = nil,
 }
 
 local function options()
@@ -84,6 +87,60 @@ local function ensure_timer()
 	end))
 end
 
+-- The title is dropped by native vim.notify, so the body carries the connection
+-- name until we know the notifier can replace a bubble.
+local function notification_body(operation, text)
+	if M.state.replaceable == true then
+		return text
+	end
+	return string.format("dbsh.nvim: %s — %s", operation.title, text)
+end
+
+local function notification_options(operation)
+	return {
+		title = operation.title,
+		id = "dbsh.progress." .. operation.id,
+		replace = operation.notification,
+	}
+end
+
+local function update_notification(operation, text)
+	-- Without replacement, one bubble per tick would be a flood.
+	if operation.notified and M.state.replaceable == false then
+		return
+	end
+	local opts = notification_options(operation)
+	opts.timeout = false
+	opts.hide_from_history = true
+	local record = vim.notify(notification_body(operation, text), vim.log.levels.INFO, opts)
+	if M.state.replaceable == nil then
+		M.state.replaceable = record ~= nil
+	end
+	if record ~= nil then
+		operation.notification = record
+	end
+	operation.notified = true
+end
+
+local function close_notification(operation, outcome)
+	-- An operation that never crossed the delay stays silent to the end.
+	if not operation.notified then
+		return
+	end
+	local elapsed = M.elapsed_text(M.clock() - operation.started_at)
+	local text, level
+	if outcome.ok then
+		text = string.format("done in %s", elapsed)
+		level = vim.log.levels.INFO
+	else
+		text = string.format("%s after %s", outcome.message or "failed", elapsed)
+		level = vim.log.levels.WARN
+	end
+	-- No timeout override here: the terminal bubble is meant to fade.
+	vim.notify(notification_body(operation, text), level, notification_options(operation))
+	operation.notification = nil
+end
+
 -- spec = {
 --   title   = string,                     -- connection name, notification title
 --   summary = string,                     -- raw SQL or object label
@@ -105,6 +162,8 @@ function M.start(spec)
 		window = type(spec.window) == "function" and spec.window or nil,
 		started_at = M.clock(),
 		rendered = nil,
+		notification = nil,
+		notified = false,
 	}
 	ensure_timer()
 	return id
@@ -124,6 +183,7 @@ function M.finish(id, outcome)
 		return
 	end
 	M.state.operations[id] = nil
+	close_notification(operation, outcome or {})
 	if next(M.state.operations) == nil then
 		stop_timer()
 	end
@@ -150,6 +210,7 @@ function M.tick()
 				operation.summary,
 				M.elapsed_text(elapsed)
 			)
+			update_notification(operation, operation.rendered)
 		end
 	end
 end
