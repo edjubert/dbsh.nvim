@@ -5,6 +5,7 @@
 local config = require("dbsh.config")
 local context = require("dbsh.context")
 local credentials = require("dbsh.credentials")
+local progress = require("dbsh.progress")
 
 local M = {}
 
@@ -33,6 +34,38 @@ local function prune_slots(snapshot, slots)
 	end
 end
 
+-- The slot holds the raw process handle once started, so the operation table is
+-- no longer reachable from it: progress ids need a registry of their own.
+local progress_ids = {}
+
+local function progress_key(snapshot, slot)
+	return tostring(snapshot.id) .. "/" .. slot
+end
+
+local function progress_start(snapshot, slot, source, fallback_summary)
+	local spec = (type(source) == "table" and source.progress) or {}
+	progress_ids[progress_key(snapshot, slot)] = progress.start({
+		title = snapshot.connection_name or tostring(snapshot.id),
+		summary = spec.summary or fallback_summary,
+		label = spec.label,
+		window = spec.window,
+	})
+end
+
+local function progress_finish(snapshot, slot, outcome)
+	local key = progress_key(snapshot, slot)
+	local id = progress_ids[key]
+	if id == nil then
+		return
+	end
+	progress_ids[key] = nil
+	progress.finish(id, outcome)
+end
+
+local function progress_relabel(snapshot, slot, label)
+	progress.relabel(progress_ids[progress_key(snapshot, slot)], label)
+end
+
 function M.write_script(backend, sql, mode)
 	local path = os.tmpname()
 	local fd = assert(io.open(path, "w"))
@@ -47,6 +80,9 @@ end
 function M.cancel(slot, snapshot_or_bufnr)
 	slot = slot or "user"
 	local snapshot = snapshot_for(snapshot_or_bufnr)
+	-- Before the early returns below: a cancelled slot must never leave a
+	-- progress entry behind.
+	progress_finish(snapshot, slot, { ok = false, message = "cancelled" })
 	local slots = slots_for(snapshot, false)
 	if slots == nil then
 		return
@@ -96,6 +132,9 @@ function M.run(sql, opts, callback)
 	local operation = {}
 	local retry_count = 0
 	slots[slot] = operation
+	-- Armed before backend.prepare: for Snowflake the password command and the
+	-- SSO round trip happen there, and that is the longest wait in the plugin.
+	progress_start(snapshot, slot, opts, sql)
 
 	local function is_active()
 		local current_slots = slots_for(snapshot, false)
@@ -143,6 +182,7 @@ function M.run(sql, opts, callback)
 	local function execute(runtime)
 		if not context.is_current(snapshot) then
 			discard_operation()
+			progress_finish(snapshot, slot, { ok = false, message = "context changed" })
 			return nil
 		end
 		if not is_active() then
@@ -164,10 +204,14 @@ function M.run(sql, opts, callback)
 				end
 				if not context.is_current(snapshot) then
 					discard_operation()
+					progress_finish(snapshot, slot, { ok = false, message = "context changed" })
 					return
 				end
 				if should_retry(obj, runtime) then
 					retry_count = retry_count + 1
+					-- Relabel, never restart: the clock must keep running so the
+					-- doubled wait is visible.
+					progress_relabel(snapshot, slot, "re-authenticating")
 					credentials.invalidate(runtime.credential_key)
 					slots = slots_for(snapshot, true)
 					slots[slot] = operation
@@ -178,6 +222,7 @@ function M.run(sql, opts, callback)
 				if not discard_operation() then
 					return
 				end
+				progress_finish(snapshot, slot, { ok = obj.code == 0 })
 				callback(obj.code, obj.stdout or "", obj.stderr or "")
 			end)
 		)
@@ -198,6 +243,7 @@ function M.run(sql, opts, callback)
 			prepared_once = true
 			if prepare_err ~= nil or type(runtime) ~= "table" then
 				if discard_operation() then
+					progress_finish(snapshot, slot, { ok = false, message = "preparation failed" })
 					callback(1, "", "dbsh.nvim: backend preparation failed")
 				end
 				return nil
@@ -234,6 +280,7 @@ function M.run_argv(snapshot_or_bufnr, request, callback)
 	local slots = slots_for(snapshot, true)
 	local operation = {}
 	slots[slot] = operation
+	progress_start(snapshot, slot, request, "fetching definition")
 	local handle = M.runner(
 		request.argv,
 		{
@@ -252,6 +299,7 @@ function M.run_argv(snapshot_or_bufnr, request, callback)
 			end
 			current_slots[slot] = nil
 			prune_slots(snapshot, current_slots)
+			progress_finish(snapshot, slot, { ok = obj.code == 0 })
 			if not context.is_current(snapshot) then
 				return
 			end
