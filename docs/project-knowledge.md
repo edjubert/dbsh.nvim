@@ -52,6 +52,19 @@ argv, mis dans `SNOWFLAKE_PASSWORD` pour le processus `snow` enfant. Les secrets
 ne doivent jamais rejoindre le contexte public, les clés de catalogue, les
 buffers de résultat, les erreurs ou la persistance.
 
+`progress.lua` rapporte les opérations en vol sur deux surfaces : le winbar de la
+fenêtre qui portera la sortie, et une notification titrée du nom de connexion. Il
+ne requiert que `config` : la fenêtre à décorer lui arrive sous forme de
+résolveur `function(): integer|nil` fourni par l’appelant, ce qui évite le cycle
+`definitions → exec → progress → definitions`. `exec.lua` est le seul à l’armer
+et à le désarmer, sur ses deux portes d’entrée, et tient pour cela un registre
+d’identifiants indexé `"<session_id>/<slot>"` : après le lancement du process, le
+slot ne contient plus l’opération mais son handle, et l’identifiant ne serait
+plus joignable depuis l’annulation. L’armement précède `backend.prepare`, donc il
+couvre l’authentification d’un backend. Seuls un titre et un résumé publics
+atteignent l’indicateur : jamais un argv, jamais un environnement, jamais un
+`runtime`.
+
 `safety.lua` est pur et ne dépend pas de l’UI. Son classifieur est volontairement
 conservateur : lectures connues exécutées directement, mutations/privilèges,
 entrées ambiguës et multi-statements confirmés par défaut. C’est un garde-fou
