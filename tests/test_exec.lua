@@ -6,6 +6,7 @@ local context = require("dbsh.context")
 local credentials = require("dbsh.credentials")
 local exec = require("dbsh.exec")
 local postgres = require("dbsh.backends.postgres")
+local progress = require("dbsh.progress")
 
 local original_runner
 local original_prepare
@@ -13,6 +14,9 @@ local original_postgres_argv
 local original_postgres_env
 local original_is_authentication_error
 local original_invalidate
+local original_progress_start
+local original_progress_finish
+local original_progress_relabel
 
 local T = MiniTest.new_set({
 	hooks = {
@@ -32,9 +36,17 @@ local T = MiniTest.new_set({
 			original_is_authentication_error = postgres.is_authentication_error
 			original_invalidate = credentials.invalidate
 			credentials.clear()
+			original_progress_start = progress.start
+			original_progress_finish = progress.finish
+			original_progress_relabel = progress.relabel
 		end,
 		post_case = function()
 			exec.runner = original_runner
+			for session_id, slots in pairs(exec.slots) do
+				for slot in pairs(slots) do
+					exec.cancel(slot, { id = session_id })
+				end
+			end
 			exec.slots = {}
 			postgres.prepare = original_prepare
 			postgres.argv = original_postgres_argv
@@ -42,6 +54,10 @@ local T = MiniTest.new_set({
 			postgres.is_authentication_error = original_is_authentication_error
 			credentials.invalidate = original_invalidate
 			credentials.clear()
+			progress.start = original_progress_start
+			progress.finish = original_progress_finish
+			progress.relabel = original_progress_relabel
+			progress.stop_all()
 		end,
 	},
 })
@@ -528,6 +544,134 @@ T["reports an error when the context connection type has no backend"] = function
 
 	eq(code, 1)
 	expect_match(stderr, "unknown connection type")
+end
+
+local function recording_progress()
+	local events = {}
+	progress.start = function(spec)
+		table.insert(events, { kind = "start", spec = spec })
+		return #events
+	end
+	progress.finish = function(id, outcome)
+		table.insert(events, { kind = "finish", id = id, outcome = outcome })
+	end
+	progress.relabel = function(id, label)
+		table.insert(events, { kind = "relabel", id = id, label = label })
+	end
+	return events
+end
+
+T["arms progress with the caller summary and finishes it on success"] = function()
+	local events = recording_progress()
+	postgres.prepare = nil
+	local callbacks = {}
+	exec.runner = function(_, _, callback)
+		table.insert(callbacks, callback)
+		return { kill = function() end }
+	end
+
+	local window = function() return 7 end
+	exec.run("PREAMBLE\nSELECT 1;", {
+		progress = { summary = "SELECT 1;", window = window },
+	}, function() end)
+
+	eq(events[1].kind, "start")
+	eq(events[1].spec.summary, "SELECT 1;")
+	eq(events[1].spec.title, "local_db")
+	eq(events[1].spec.window, window)
+
+	callbacks[1]({ code = 0, stdout = "ok", stderr = "" })
+	vim.wait(200, function() return #events == 2 end)
+	eq(events[2], { kind = "finish", id = 1, outcome = { ok = true } })
+end
+
+T["falls back to the executed SQL when the caller gives no summary"] = function()
+	local events = recording_progress()
+	postgres.prepare = nil
+	exec.runner = function(_, _, _)
+		return { kill = function() end }
+	end
+
+	exec.run("SELECT 42;", {}, function() end)
+
+	eq(events[1].spec.summary, "SELECT 42;")
+	eq(events[1].spec.window, nil)
+end
+
+T["reports a non-zero exit as a failed outcome"] = function()
+	local events = recording_progress()
+	postgres.prepare = nil
+	local callbacks = {}
+	exec.runner = function(_, _, callback)
+		table.insert(callbacks, callback)
+		return { kill = function() end }
+	end
+
+	exec.run("SELECT 1;", {}, function() end)
+	callbacks[1]({ code = 3, stdout = "", stderr = "boom" })
+	vim.wait(200, function() return #events == 2 end)
+
+	eq(events[2].outcome, { ok = false })
+end
+
+T["finishes progress when an operation is cancelled"] = function()
+	local events = recording_progress()
+	postgres.prepare = nil
+	exec.runner = function(_, _, _)
+		return { kill = function() end }
+	end
+
+	exec.run("SELECT 1;", {}, function() end)
+	exec.cancel("user", 0)
+
+	eq(events[2].kind, "finish")
+	eq(events[2].outcome, { ok = false, message = "cancelled" })
+end
+
+T["relabels progress instead of restarting it on an authentication retry"] = function()
+	local events = recording_progress()
+	local callbacks = {}
+	postgres.prepare = function(_, _, callback)
+		callback({ credential_backed = true, credential_key = "public-profile", password = "fake-password" })
+	end
+	postgres.is_authentication_error = function(stderr)
+		return stderr == "authentication failed"
+	end
+	credentials.invalidate = function() end
+	exec.runner = function(_, _, callback)
+		table.insert(callbacks, callback)
+		return { kill = function() end }
+	end
+
+	exec.run("SELECT 1;", {}, function() end)
+	callbacks[1]({ code = 1, stdout = "", stderr = "authentication failed" })
+	vim.wait(200, function() return #callbacks == 2 end)
+
+	eq(events[2], { kind = "relabel", id = 1, label = "re-authenticating" })
+	callbacks[2]({ code = 0, stdout = "ok", stderr = "" })
+	vim.wait(200, function() return #events == 3 end)
+	eq(events[3], { kind = "finish", id = 1, outcome = { ok = true } })
+end
+
+T["arms progress for a definition argv and finishes it"] = function()
+	local events = recording_progress()
+	local callbacks = {}
+	exec.runner = function(_, _, callback)
+		table.insert(callbacks, callback)
+		return { kill = function() end }
+	end
+
+	exec.run_argv(0, {
+		argv = { "pg_dump", "--schema-only" },
+		progress = { summary = "public.users  [table]", label = "loading" },
+	}, function() end)
+
+	eq(events[1].spec.summary, "public.users  [table]")
+	eq(events[1].spec.label, "loading")
+
+	callbacks[1]({ code = 0, stdout = "CREATE TABLE", stderr = "" })
+	vim.wait(200, function() return #events == 2 end)
+	eq(events[2].outcome, { ok = true })
 end
 
 return T
