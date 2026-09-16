@@ -32,6 +32,21 @@ local function concrete_bufnr(bufnr)
 	return bufnr
 end
 
+-- The managed client belongs only on buffers written in the backend's own
+-- language. Without this gate it lands on whatever buffer happens to be
+-- current when the pool is reconciled -- a README, a lua config file -- and
+-- decorates it with SQL syntax diagnostics.
+local function buffer_speaks_backend(bufnr, snapshot)
+	if not vim.api.nvim_buf_is_valid(bufnr) then
+		return false
+	end
+	local backend = context.backend(snapshot)
+	if backend == nil or backend.filetype == nil then
+		return false
+	end
+	return vim.bo[bufnr].filetype == backend.filetype
+end
+
 function M.start_client(client_config)
 	return vim.lsp.start(client_config, { attach = false })
 end
@@ -387,7 +402,7 @@ end
 function M.attach_managed(bufnr, snapshot)
 	bufnr = concrete_bufnr(bufnr)
 	local descriptor, connection, opts = managed_target(snapshot)
-	if descriptor == nil then
+	if descriptor == nil or not buffer_speaks_backend(bufnr, snapshot) then
 		return
 	end
 	local key = M.client_key(snapshot)
@@ -525,7 +540,10 @@ function M.reconcile_managed(bufnr, snapshot)
 	end
 	bufnr = concrete_bufnr(bufnr)
 	local descriptor = managed_target(snapshot)
-	local key = descriptor and M.client_key(snapshot) or nil
+	local key = nil
+	if descriptor ~= nil and buffer_speaks_backend(bufnr, snapshot) then
+		key = M.client_key(snapshot)
+	end
 	local record = record_for_buffer(bufnr)
 	if record ~= nil and record.key == key then
 		return record.client_id
