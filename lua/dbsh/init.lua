@@ -124,7 +124,26 @@ function M.query_selection()
 	M.query(table.concat(region, "\n"))
 end
 
+local function tabular_results()
+	local snapshot = active_snapshot()
+	local backend = context.backend(snapshot)
+	if backend == nil or backend.tabular ~= false then
+		return true
+	end
+	vim.notify(
+		string.format(
+			"dbsh.nvim: yanking cells needs a drawn table; the %s backend renders documents",
+			snapshot.backend_name or (snapshot.connection and snapshot.connection.type) or "current"
+		),
+		vim.log.levels.WARN
+	)
+	return false
+end
+
 function M.yank_cell()
+	if not tabular_results() then
+		return
+	end
 	vim.api.nvim_feedkeys(
 		vim.api.nvim_replace_termcodes("/<C-v>u2502<Esc>gemz", true, true, true), "n", false)
 	vim.api.nvim_feedkeys(
@@ -145,6 +164,9 @@ function M.yank_registers(clipboard)
 end
 
 function M.yank_csv()
+	if not tabular_results() then
+		return
+	end
 	local mode = vim.fn.mode()
 	if mode ~= csv.LINEWISE and mode ~= csv.BLOCKWISE then
 		vim.notify(

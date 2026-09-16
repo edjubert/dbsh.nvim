@@ -779,4 +779,16 @@ T["passes the active backend to the safety classifier"] = function()
 	eq(type(captured.backend.argv), "function")
 end
 
+T["refuses yanks on a non-tabular backend"] = function()
+	local original_backend, original_notify = context.backend, vim.notify
+	local notified
+	context.backend = function() return { tabular = false } end
+	vim.notify = function(message) notified = message end
+	dbsh.yank_csv()
+	expect_match(notified, "needs a drawn table")
+	dbsh.yank_cell()
+	expect_match(notified, "needs a drawn table")
+	vim.notify, context.backend = original_notify, original_backend
+end
+
 return T
