@@ -69,4 +69,12 @@ T["parses EJSON without echoing invalid output"] = function()
 	eq(err:find("s3cr3t", 1, true), nil)
 end
 
+T["classifies Mongo reads conservatively"] = function()
+	eq(mongo.classify("db.users.find();"), { action = "run", reason = "read" })
+	eq(mongo.classify("db.users.find().limit(1)").action, "run")
+	eq(mongo.classify("db.users.deleteOne({})").action, "confirm")
+	eq(mongo.classify("db.users.find().forEach(d => db.users.deleteOne(d))").action, "confirm")
+	eq(mongo.classify("db.users.find(); db.users.drop()").reason, "multiple_statements")
+end
+
 return T
