@@ -66,13 +66,21 @@ local function progress_relabel(snapshot, slot, label)
 	progress.relabel(progress_ids[progress_key(snapshot, slot)], label)
 end
 
-function M.write_script(backend, sql, mode)
+-- A backend whose language needs the text wrapped rather than prefixed — the
+-- raw mode of a JavaScript shell, for instance — declares compose. It receives
+-- the connection and the runtime because such a backend builds its own
+-- connection inside the script rather than through the argv.
+function M.compose_script(backend, text, mode, connection, runtime)
+	if type(backend.compose) == "function" then
+		return backend.compose(text, mode, connection, runtime)
+	end
+	return backend.preamble(mode) .. "\n" .. text .. "\n"
+end
+
+function M.write_script(backend, sql, mode, connection, runtime)
 	local path = os.tmpname()
 	local fd = assert(io.open(path, "w"))
-	fd:write(backend.preamble(mode))
-	fd:write("\n")
-	fd:write(sql)
-	fd:write("\n")
+	fd:write(M.compose_script(backend, sql, mode, connection, runtime))
 	fd:close()
 	return path
 end
