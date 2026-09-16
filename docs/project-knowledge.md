@@ -23,6 +23,12 @@ Un backend ne requiert jamais `config`, `definitions` ou l’état global. Les
 valeurs nécessaires lui sont passées en argument. Les accès à `exec` depuis un
 backend sont différés pour éviter le cycle avec le registre de backends.
 
+Un backend non SQL peut déclarer `compose` pour envelopper le texte,
+`script_delivery = "stdin"` pour porter un secret sans fichier temporaire,
+`classify` pour remplacer le scanner SQL et `tabular = false` pour une sortie
+documentaire. `csv.lua` découpe les cellules sur │, donc les yanks refusent
+explicitement une sortie non tabulaire.
+
 ## Contextes, résultats et définitions
 
 `config.lua` contient les options et profils déclarés immuables.
@@ -73,6 +79,12 @@ plus joignable depuis l’annulation. L’armement précède `backend.prepare`, 
 couvre l’authentification d’un backend. Seuls un titre et un résumé publics
 atteignent l’indicateur : jamais un argv, jamais un environnement, jamais un
 `runtime`.
+
+`exec.compose_script` est le point unique de fabrication du script et reçoit la
+connexion et le runtime. `safety.classify` délègue à `backend.classify` ;
+`config.connection` utilise `backend.validate`, tandis que `config.backend_for`
+signale seul un type inconnu. dbsh ne possède aucun tunnel : un proxy SOCKS doit
+être ouvert hors de l'éditeur.
 
 `safety.lua` est pur et ne dépend pas de l’UI. Son classifieur est volontairement
 conservateur : lectures connues exécutées directement, mutations/privilèges,

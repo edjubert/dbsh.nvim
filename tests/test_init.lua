@@ -759,4 +759,61 @@ T["clears the progress registry when Neovim exits"] = function()
 	eq(#autocmds, 3)
 end
 
+T["passes the active backend to the safety classifier"] = function()
+	local safety = require("dbsh.safety")
+	local captured
+	local original_classify = safety.classify
+	safety.classify = function(sql, backend)
+		captured = { sql = sql, backend = backend }
+		return { action = "run", reason = "read" }
+	end
+	exec.runner = function(_, _, _)
+		return { kill = function() end }
+	end
+
+	dbsh.query("SELECT 1;")
+
+	safety.classify = original_classify
+	eq(captured.sql, "SELECT 1;")
+	eq(type(captured.backend), "table")
+	eq(type(captured.backend.argv), "function")
+end
+
+T["refuses yanks on a non-tabular backend"] = function()
+	local original_backend, original_notify = context.backend, vim.notify
+	local notified
+	context.backend = function() return { tabular = false } end
+	vim.notify = function(message) notified = message end
+	dbsh.yank_csv()
+	expect_match(notified, "needs a drawn table")
+	dbsh.yank_cell()
+	expect_match(notified, "needs a drawn table")
+	vim.notify, context.backend = original_notify, original_backend
+end
+
+T["reconciles managed PgLS when a buffer receives its filetype after setup"] = function()
+	local lsp = require("dbsh.lsp")
+	local original = lsp.reconcile_managed
+	local seen = {}
+	lsp.reconcile_managed = function(bufnr)
+		table.insert(seen, bufnr)
+	end
+
+	dbsh.setup({
+		connections = {
+			local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
+		},
+		default = "local_db",
+		lsp = { mode = "managed" },
+	})
+
+	local buf = vim.api.nvim_create_buf(false, true)
+	seen = {}
+	vim.api.nvim_exec_autocmds("FileType", { buffer = buf })
+
+	lsp.reconcile_managed = original
+	eq(seen, { buf })
+	vim.api.nvim_buf_delete(buf, { force = true })
+end
+
 return T

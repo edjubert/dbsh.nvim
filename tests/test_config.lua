@@ -270,4 +270,67 @@ T["falls back from an invalid progress table with a clear warning"] = function()
 	expect_match(notified, "progress")
 end
 
+T["asks the backend registry for the profile validator"] = function()
+	local backends = require("dbsh.backends")
+	local captured
+	local original = backends.registry.postgres.validate
+	backends.registry.postgres.validate = function(connection)
+		captured = connection
+		return nil, "postgres profile is unacceptable"
+	end
+
+	config.setup({
+		connections = { pg = { host = "h", port = 1, database = "d", username = "u" } },
+		default = "pg",
+	})
+	local connection, err = config.connection("pg")
+
+	backends.registry.postgres.validate = original
+	eq(connection, nil)
+	expect_match(err, "postgres profile is unacceptable")
+	eq(captured.host, "h")
+end
+
+T["accepts a profile whose backend declares no validator"] = function()
+	config.setup({
+		connections = { pg = { host = "h", port = 1, database = "d", username = "u" } },
+		default = "pg",
+	})
+
+	eq(config.connection("pg").host, "h")
+end
+
+T["resolves the mongo backend from a profile type"] = function()
+	config.setup({
+		connections = {
+			atlas = {
+				type = "mongo", srv = true, host = "cluster0.example.mongodb.net",
+				username = "analyst", database = "analytics",
+				proxy = { host = "127.0.0.1", port = 1080 },
+				password_command = { "password-command" },
+			},
+		},
+		default = "atlas",
+	})
+	local backend = assert(config.backend_for(assert(config.connection("atlas"))))
+	eq(type(backend.compose), "function")
+	eq(backend.script_delivery, "stdin")
+end
+
+T["rejects an invalid mongo profile through its backend validator"] = function()
+	config.setup({
+		connections = {
+			atlas = {
+				type = "mongo", srv = true, host = "cluster0.example.mongodb.net",
+				username = "analyst", database = "analytics",
+				password_command = { "password-command" },
+			},
+		},
+		default = "atlas",
+	})
+	local connection, err = config.connection("atlas")
+	eq(connection, nil)
+	expect_match(err, "proxy")
+end
+
 return T

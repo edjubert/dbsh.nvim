@@ -66,13 +66,21 @@ local function progress_relabel(snapshot, slot, label)
 	progress.relabel(progress_ids[progress_key(snapshot, slot)], label)
 end
 
-function M.write_script(backend, sql, mode)
+-- A backend whose language needs the text wrapped rather than prefixed — the
+-- raw mode of a JavaScript shell, for instance — declares compose. It receives
+-- the connection and the runtime because such a backend builds its own
+-- connection inside the script rather than through the argv.
+function M.compose_script(backend, text, mode, connection, runtime)
+	if type(backend.compose) == "function" then
+		return backend.compose(text, mode, connection, runtime)
+	end
+	return backend.preamble(mode) .. "\n" .. text .. "\n"
+end
+
+function M.write_script(backend, sql, mode, connection, runtime)
 	local path = os.tmpname()
 	local fd = assert(io.open(path, "w"))
-	fd:write(backend.preamble(mode))
-	fd:write("\n")
-	fd:write(sql)
-	fd:write("\n")
+	fd:write(M.compose_script(backend, sql, mode, connection, runtime))
 	fd:close()
 	return path
 end
@@ -189,16 +197,30 @@ function M.run(sql, opts, callback)
 			return nil
 		end
 
-		local tmpfile = M.write_script(backend, sql, mode)
+		-- A script that carries a credential must never touch the disk: such a
+		-- backend asks for stdin delivery instead.
+		local deliver_on_stdin = backend.script_delivery == "stdin"
+		local tmpfile = nil
+		local script_path = "/dev/stdin"
+		local script_stdin = nil
+		if deliver_on_stdin then
+			script_stdin = M.compose_script(backend, sql, mode, snapshot.connection, runtime)
+		else
+			tmpfile = M.write_script(backend, sql, mode, snapshot.connection, runtime)
+			script_path = tmpfile
+		end
 		local handle = M.runner(
-			backend.argv(snapshot.connection, tmpfile, mode, runtime),
+			backend.argv(snapshot.connection, script_path, mode, runtime),
 			{
 				text = true,
 				timeout = opts.timeout or config.options().query_timeout,
 				env = backend.env(snapshot.connection, config.options(), runtime),
+				stdin = script_stdin,
 			},
 			vim.schedule_wrap(function(obj)
-				os.remove(tmpfile)
+				if tmpfile ~= nil then
+					os.remove(tmpfile)
+				end
 				if not is_active() then
 					return
 				end

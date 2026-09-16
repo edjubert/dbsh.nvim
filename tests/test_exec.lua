@@ -50,6 +50,7 @@ local T = MiniTest.new_set({
 			exec.slots = {}
 			postgres.prepare = original_prepare
 			postgres.argv = original_postgres_argv
+			postgres.script_delivery = nil
 			postgres.env = original_postgres_env
 			postgres.is_authentication_error = original_is_authentication_error
 			credentials.invalidate = original_invalidate
@@ -672,6 +673,83 @@ T["arms progress for a definition argv and finishes it"] = function()
 	callbacks[1]({ code = 0, stdout = "CREATE TABLE", stderr = "" })
 	vim.wait(200, function() return #events == 2 end)
 	eq(events[2].outcome, { ok = true })
+end
+
+T["composes a script with the backend preamble by default"] = function()
+	eq(
+		exec.compose_script(postgres, "SELECT 1;", "raw"),
+		postgres.preamble("raw") .. "\n" .. "SELECT 1;" .. "\n"
+	)
+end
+
+T["lets a backend compose its own script"] = function()
+	local captured
+	local composer = {
+		preamble = function() return "UNUSED" end,
+		compose = function(text, mode, connection, runtime)
+			captured = { text = text, mode = mode, connection = connection, runtime = runtime }
+			return "WRAPPED(" .. text .. ")"
+		end,
+	}
+
+	local connection = { host = "cluster.example", username = "analyst" }
+	local runtime = { password = "s3cr3t" }
+	eq(
+		exec.compose_script(composer, "db.users.find()", "pretty", connection, runtime),
+		"WRAPPED(db.users.find())"
+	)
+	eq(captured.text, "db.users.find()")
+	eq(captured.mode, "pretty")
+	eq(captured.connection, connection)
+	eq(captured.runtime, runtime)
+end
+
+T["delivers a script on stdin without writing a temporary file"] = function()
+	local captured_argv, captured_opts
+	local wrote = false
+	local original_write_script = exec.write_script
+	exec.write_script = function(...)
+		wrote = true
+		return original_write_script(...)
+	end
+	postgres.prepare = nil
+	postgres.script_delivery = "stdin"
+	postgres.argv = function(_, path, _, _)
+		return { "fake-cli", "--file", path }
+	end
+	exec.runner = function(argv, opts, _)
+		captured_argv, captured_opts = argv, opts
+		return { kill = function() end }
+	end
+
+	exec.run("SELECT 1;", {}, function() end)
+
+	exec.write_script = original_write_script
+	postgres.script_delivery = nil
+	eq(wrote, false)
+	eq(captured_argv, { "fake-cli", "--file", "/dev/stdin" })
+	eq(
+		captured_opts.stdin,
+		exec.compose_script(postgres, "SELECT 1;", "pretty", context.snapshot(0).connection, {})
+	)
+end
+
+T["keeps writing a temporary file for a backend that does not ask for stdin"] = function()
+	local captured_argv, captured_opts
+	postgres.prepare = nil
+	postgres.argv = function(_, path, _, _)
+		return { "fake-cli", "--file", path }
+	end
+	exec.runner = function(argv, opts, _)
+		captured_argv, captured_opts = argv, opts
+		return { kill = function() end }
+	end
+
+	exec.run("SELECT 1;", {}, function() end)
+
+	eq(captured_opts.stdin, nil)
+	eq(captured_argv[3] ~= "/dev/stdin", true)
+	eq(vim.fn.filereadable(captured_argv[3]), 1)
 end
 
 return T

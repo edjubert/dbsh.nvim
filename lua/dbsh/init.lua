@@ -74,7 +74,10 @@ function M.query(sql)
 	end
 
 	local snapshot = context.snapshot(0)
-	local classification = safety.classify(sql)
+	-- Only the first return value: a buffer without a connection falls back to
+	-- the SQL classifier, and exec.run reports the missing connection itself.
+	local backend = context.backend(snapshot)
+	local classification = safety.classify(sql, backend)
 	if config.options().safety.mode == "confirm" and classification.action == "confirm" then
 		vim.ui.select({ "Run", "Cancel" }, {
 			prompt = string.format("dbsh.nvim: confirm %s SQL: ", classification.reason),
@@ -121,7 +124,26 @@ function M.query_selection()
 	M.query(table.concat(region, "\n"))
 end
 
+local function tabular_results()
+	local snapshot = active_snapshot()
+	local backend = context.backend(snapshot)
+	if backend == nil or backend.tabular ~= false then
+		return true
+	end
+	vim.notify(
+		string.format(
+			"dbsh.nvim: yanking cells needs a drawn table; the %s backend renders documents",
+			snapshot.backend_name or (snapshot.connection and snapshot.connection.type) or "current"
+		),
+		vim.log.levels.WARN
+	)
+	return false
+end
+
 function M.yank_cell()
+	if not tabular_results() then
+		return
+	end
 	vim.api.nvim_feedkeys(
 		vim.api.nvim_replace_termcodes("/<C-v>u2502<Esc>gemz", true, true, true), "n", false)
 	vim.api.nvim_feedkeys(
@@ -142,6 +164,9 @@ function M.yank_registers(clipboard)
 end
 
 function M.yank_csv()
+	if not tabular_results() then
+		return
+	end
 	local mode = vim.fn.mode()
 	if mode ~= csv.LINEWISE and mode ~= csv.BLOCKWISE then
 		vim.notify(
@@ -359,6 +384,19 @@ function M.setup(opts)
 			lsp.on_context_changed(bufnr, context.snapshot(bufnr))
 		end,
 	})
+	-- A buffer only becomes a candidate for the managed client once its
+	-- filetype is known, and for files opened after setup that happens long
+	-- after this point. Without this the pool only ever sees the buffer that
+	-- was current at startup.
+	vim.api.nvim_create_autocmd("FileType", {
+		group = group,
+		callback = function(args)
+			if config.options().lsp.mode == "managed" then
+				lsp.reconcile_managed(args.buf, context.snapshot(args.buf))
+			end
+		end,
+	})
+
 	lsp.on_context_changed(0, context.snapshot(0))
 
 	vim.api.nvim_create_autocmd("LspAttach", {
