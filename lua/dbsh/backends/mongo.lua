@@ -6,6 +6,7 @@ local credentials = require("dbsh.credentials")
 
 local M = {}
 
+M.name = "mongo"
 M.script_delivery = "stdin"
 M.tabular = false
 M.contexts = {}

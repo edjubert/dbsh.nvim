@@ -6,6 +6,7 @@ local M = {}
 M.default = "postgres"
 
 M.registry = {
+	mongo = require("dbsh.backends.mongo"),
 	postgres = require("dbsh.backends.postgres"),
 	snowflake = require("dbsh.backends.snowflake"),
 }
