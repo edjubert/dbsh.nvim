@@ -48,4 +48,25 @@ T["declares the Mongo runtime contract"] = function()
 	eq(mongo.is_authentication_error("Authentication failed", ""), true)
 end
 
+T["composes pretty and raw mongosh scripts"] = function()
+	local pretty = mongo.compose("db.users.find()", "pretty", profile(), { password = "s3cr3t" })
+	expect_match(pretty, "Mongo%(")
+	expect_match(pretty, "printjson%(")
+	eq(pretty:find("EJSON.stringify", 1, true), nil)
+
+	local raw = mongo.compose("db.users.find()", "raw", profile(), { password = "s3cr3t" })
+	expect_match(raw, "EJSON%.stringify")
+	expect_match(raw, "toArray")
+end
+
+T["parses EJSON without echoing invalid output"] = function()
+	local rows, err = mongo.parse_raw('[{"name":"ada"}]')
+	eq(err, nil)
+	eq(rows, { { name = "ada" } })
+	rows, err = mongo.parse_raw("mongodb://analyst:s3cr3t@host")
+	eq(rows, nil)
+	expect_match(err, "could not be parsed")
+	eq(err:find("s3cr3t", 1, true), nil)
+end
+
 return T

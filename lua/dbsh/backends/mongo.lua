@@ -96,11 +96,47 @@ function M.prepare(snapshot, options, callback)
 	end)
 end
 
+function M.preamble() return "" end
+
+local function js_literal(value)
+	return vim.json.encode(value)
+end
+
+function M.compose(text, mode, connection, runtime)
+	local password = (type(runtime) == "table" and runtime.password) or ""
+	local printer = "printjson(__dbsh_result);"
+	if mode == "raw" then
+		printer = "print(EJSON.stringify(__dbsh_result, null, 0, { relaxed: true }));"
+	end
+	return table.concat({
+		"const __dbsh_conn = Mongo(" .. js_literal(M.uri(connection, password)) .. ");",
+		"db = __dbsh_conn.getDB(" .. js_literal(connection.database) .. ");",
+		"const __dbsh_src = " .. js_literal(text) .. ";",
+		"let __dbsh_result = eval(__dbsh_src);",
+		'if (__dbsh_result && typeof __dbsh_result.toArray === "function") {',
+		"\t__dbsh_result = __dbsh_result.toArray();",
+		"}",
+		printer,
+		"",
+	}, "\n")
+end
+
 function M.argv(_, script_path)
 	return { "mongosh", "--nodb", "--quiet", "--norc", "--file", script_path }
 end
 
 function M.env() return {} end
+
+function M.parse_raw(stdout)
+	local text = vim.trim(stdout or "")
+	if text == "" then return {} end
+	local ok, decoded = pcall(vim.json.decode, text)
+	if not ok or type(decoded) ~= "table" then
+		return nil, "mongosh output could not be parsed as EJSON"
+	end
+	if decoded[1] == nil and next(decoded) ~= nil then return { decoded } end
+	return decoded
+end
 
 function M.is_authentication_error(stderr, stdout)
 	local haystack = ((stderr or "") .. "\n" .. (stdout or "")):lower()
