@@ -110,6 +110,48 @@ T["opens the requested split only once per session"] = function()
 	eq(first, second)
 end
 
+T["keeps two sessions on one connection in separate buffers"] = function()
+	-- A new scratchpad and the fallback context share a connection but not an
+	-- id: one buffer name for both would raise E95 on the second one.
+	local fresh = vim.api.nvim_create_buf(false, true)
+	assert(context.bind(fresh, "local_db", "test"))
+	snapshots.c = context.snapshot(fresh)
+
+	local a = results.open(snapshots.a)
+	local c = results.open(snapshots.c)
+
+	eq(snapshots.c.connection_name, snapshots.a.connection_name)
+	eq(snapshots.c.id == snapshots.a.id, false)
+	eq(a == c, false)
+	eq(vim.api.nvim_buf_is_valid(c), true)
+end
+
+T["recovers its buffer after the module state is lost"] = function()
+	-- Reloading the plugin empties state.buffers, but its buffers outlive it.
+	local first = results.open(snapshots.a)
+	package.loaded["dbsh.results"] = nil
+	local reloaded = require("dbsh.results")
+	package.loaded["dbsh.results"] = results
+
+	eq(reloaded.find_buf(snapshots.a), first)
+	eq(reloaded.open(snapshots.a), first)
+end
+
+T["leaves no buffer behind when a session cannot be named"] = function()
+	local before = #vim.api.nvim_list_bufs()
+	local taken = { id = snapshots.a.id .. ":clash", connection_name = "local_db" }
+	local clash = vim.api.nvim_create_buf(false, true)
+	vim.api.nvim_buf_set_name(
+		clash,
+		vim.fs.joinpath(vim.fn.getcwd(), "__DBSH__ local_db #" .. vim.fn.sha256(taken.id):sub(1, 8))
+	)
+
+	eq(pcall(results.open, taken), false)
+	-- The clash buffer above, and nothing else: no half-built leftover.
+	eq(#vim.api.nvim_list_bufs(), before + 1)
+	vim.api.nvim_buf_delete(clash, { force = true })
+end
+
 T["opens a floating window when asked"] = function()
 	local _, win = results.open(snapshots.a, { split = "float" })
 	eq(vim.api.nvim_win_get_config(win).relative, "editor")
