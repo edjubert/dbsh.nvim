@@ -212,7 +212,13 @@ local function decision(keyword)
 	return { action = "confirm", reason = "ambiguous" }
 end
 
-function M.classify(sql)
+-- backend is optional. A backend whose language is not SQL — a JavaScript shell,
+-- for instance — classifies its own statements; the SQL scanner below would call
+-- everything ambiguous.
+function M.classify(sql, backend)
+	if type(backend) == "table" and type(backend.classify) == "function" then
+		return backend.classify(sql)
+	end
 	local parsed = scan(sql or "")
 	if parsed.multiple then
 		return { action = "confirm", reason = "multiple_statements" }

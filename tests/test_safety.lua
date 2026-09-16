@@ -76,4 +76,26 @@ T["confirms unknown, malformed, and genuinely multi-statement SQL"] = function()
 	end
 end
 
+T["delegates to a backend that classifies its own statements"] = function()
+	local captured
+	local backend = {
+		classify = function(text)
+			captured = text
+			return { action = "run", reason = "javascript" }
+		end,
+	}
+
+	eq(safety.classify("db.users.find()", backend), { action = "run", reason = "javascript" })
+	eq(captured, "db.users.find()")
+end
+
+T["keeps the SQL classifier for a backend without one"] = function()
+	eq(safety.classify("SELECT 1", {}), { action = "run", reason = "read" })
+	eq(safety.classify("DELETE FROM users", {}), { action = "confirm", reason = "mutation" })
+end
+
+T["keeps the SQL classifier when no backend is given"] = function()
+	eq(safety.classify("SELECT 1"), { action = "run", reason = "read" })
+end
+
 return T
