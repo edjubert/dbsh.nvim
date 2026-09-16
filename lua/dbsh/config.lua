@@ -118,11 +118,14 @@ local function normalize_lsp(raw_lsp)
 	end
 end
 
-local function validate_snowflake_profile(connection)
-	if connection.type ~= "snowflake" then
+-- An unknown type is not this function's error to report: backend_for owns that
+-- message, and M.connection must keep returning the profile so the caller reaches
+-- it.
+local function validate_profile(connection)
+	local backend = backends.get(connection.type)
+	if backend == nil or type(backend.validate) ~= "function" then
 		return true
 	end
-	local backend = assert(backends.get("snowflake"))
 	return backend.validate(connection)
 end
 
@@ -175,7 +178,7 @@ function M.connection(name)
 		return nil, string.format("unknown connection '%s'", tostring(name))
 	end
 	local copy = vim.deepcopy(connection)
-	local valid, err = validate_snowflake_profile(copy)
+	local valid, err = validate_profile(copy)
 	if valid == nil then
 		return nil, err
 	end

@@ -270,4 +270,34 @@ T["falls back from an invalid progress table with a clear warning"] = function()
 	expect_match(notified, "progress")
 end
 
+T["asks the backend registry for the profile validator"] = function()
+	local backends = require("dbsh.backends")
+	local captured
+	local original = backends.registry.postgres.validate
+	backends.registry.postgres.validate = function(connection)
+		captured = connection
+		return nil, "postgres profile is unacceptable"
+	end
+
+	config.setup({
+		connections = { pg = { host = "h", port = 1, database = "d", username = "u" } },
+		default = "pg",
+	})
+	local connection, err = config.connection("pg")
+
+	backends.registry.postgres.validate = original
+	eq(connection, nil)
+	expect_match(err, "postgres profile is unacceptable")
+	eq(captured.host, "h")
+end
+
+T["accepts a profile whose backend declares no validator"] = function()
+	config.setup({
+		connections = { pg = { host = "h", port = 1, database = "d", username = "u" } },
+		default = "pg",
+	})
+
+	eq(config.connection("pg").host, "h")
+end
+
 return T
