@@ -197,16 +197,30 @@ function M.run(sql, opts, callback)
 			return nil
 		end
 
-		local tmpfile = M.write_script(backend, sql, mode)
+		-- A script that carries a credential must never touch the disk: such a
+		-- backend asks for stdin delivery instead.
+		local deliver_on_stdin = backend.script_delivery == "stdin"
+		local tmpfile = nil
+		local script_path = "/dev/stdin"
+		local script_stdin = nil
+		if deliver_on_stdin then
+			script_stdin = M.compose_script(backend, sql, mode, snapshot.connection, runtime)
+		else
+			tmpfile = M.write_script(backend, sql, mode, snapshot.connection, runtime)
+			script_path = tmpfile
+		end
 		local handle = M.runner(
-			backend.argv(snapshot.connection, tmpfile, mode, runtime),
+			backend.argv(snapshot.connection, script_path, mode, runtime),
 			{
 				text = true,
 				timeout = opts.timeout or config.options().query_timeout,
 				env = backend.env(snapshot.connection, config.options(), runtime),
+				stdin = script_stdin,
 			},
 			vim.schedule_wrap(function(obj)
-				os.remove(tmpfile)
+				if tmpfile ~= nil then
+					os.remove(tmpfile)
+				end
 				if not is_active() then
 					return
 				end
