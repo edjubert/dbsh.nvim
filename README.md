@@ -89,6 +89,10 @@ Contexts, paged catalogues and relation inspection all use the same picker
 surface. Selecting a relation previews rows; structural objects open a
 read-only definition buffer.
 
+Every picker titles itself with the context it reads from —
+`dbsh tables - heimdall - dashboard`: the connection, then the database when it
+is not the connection's namesake, then the schema in scope.
+
 ---
 
 ## Requirements
@@ -568,7 +572,7 @@ exactly where you expect the table.
 SCREENSHOT docs/media/picker-schemas_1.png + docs/media/picker-schemas_2.png
 Shows: the drill-down. Frame 1, :DbSchemas with a schema highlighted.
   Frame 2, the table picker that opens after selecting it, titled
-  "dbsh tables - <schema>".
+  "dbsh tables - <connection> - <schema>".
 -->
 <table>
 <tr>

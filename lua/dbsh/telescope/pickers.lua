@@ -262,6 +262,34 @@ local function item_label(item)
 	return item.name or item.key or item.kind or vim.inspect(item)
 end
 
+-- `dbsh tables - heimdall - dashboard`: which profile, which database when it
+-- is not the profile's namesake, and which schema the listing is scoped to.
+-- `schema` overrides the context level for callers that scoped themselves after
+-- capturing their snapshot.
+local function titled(title, snapshot, schema)
+	local connection = snapshot.connection or {}
+	local levels = snapshot.levels or {}
+	local parts = { title }
+
+	local function append(part)
+		if type(part) == "string" and part ~= "" then
+			table.insert(parts, part)
+		end
+	end
+
+	local name = snapshot.connection_name
+	append(name)
+	-- A profile usually carries a database of the same name, and printing it
+	-- twice would push the schema out of a narrow window.
+	local database = levels.database or connection.database
+	if database ~= name then
+		append(database)
+	end
+	append(schema or levels.schema or connection.schema)
+
+	return table.concat(parts, " - ")
+end
+
 local function choose(title, items, callback, options)
 	options = options or {}
 	local t = M._telescope()
@@ -368,7 +396,7 @@ function M.context(key, options)
 				return a.value == options.preferred and b.value ~= options.preferred
 			end)
 		end
-		choose("dbsh " .. definition.title:lower(), items, function(item)
+		choose(titled("dbsh " .. definition.title:lower(), snapshot), items, function(item)
 			if item == nil then
 				return
 			end
@@ -477,7 +505,12 @@ function M.catalog(key, options)
 				if more ~= nil then
 					table.insert(items, more)
 				end
-				choose("dbsh " .. definition.title:lower(), items, function(item)
+				local title = titled(
+					"dbsh " .. definition.title:lower(),
+					snapshot,
+					scope and scope.schema
+				)
+				choose(title, items, function(item)
 					if item == nil then
 						return
 					end
