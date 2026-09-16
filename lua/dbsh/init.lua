@@ -74,7 +74,10 @@ function M.query(sql)
 	end
 
 	local snapshot = context.snapshot(0)
-	local classification = safety.classify(sql)
+	-- Only the first return value: a buffer without a connection falls back to
+	-- the SQL classifier, and exec.run reports the missing connection itself.
+	local backend = context.backend(snapshot)
+	local classification = safety.classify(sql, backend)
 	if config.options().safety.mode == "confirm" and classification.action == "confirm" then
 		vim.ui.select({ "Run", "Cancel" }, {
 			prompt = string.format("dbsh.nvim: confirm %s SQL: ", classification.reason),

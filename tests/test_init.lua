@@ -759,4 +759,24 @@ T["clears the progress registry when Neovim exits"] = function()
 	eq(#autocmds, 3)
 end
 
+T["passes the active backend to the safety classifier"] = function()
+	local safety = require("dbsh.safety")
+	local captured
+	local original_classify = safety.classify
+	safety.classify = function(sql, backend)
+		captured = { sql = sql, backend = backend }
+		return { action = "run", reason = "read" }
+	end
+	exec.runner = function(_, _, _)
+		return { kill = function() end }
+	end
+
+	dbsh.query("SELECT 1;")
+
+	safety.classify = original_classify
+	eq(captured.sql, "SELECT 1;")
+	eq(type(captured.backend), "table")
+	eq(type(captured.backend.argv), "function")
+end
+
 return T
