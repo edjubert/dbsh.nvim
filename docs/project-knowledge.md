@@ -31,10 +31,19 @@ liés et un contexte indépendant par buffer/scratchpad. Un snapshot est copié
 avant chaque requête, catalogue, résultat ou définition ; `generation` empêche
 un callback tardif d’écraser un contexte modifié.
 
-`results.lua` garde un buffer `__DBSH__` par session. `definitions.lua` garde un
-buffer DDL par identité publique d’objet : backend, empreinte publique de la
-connexion, niveaux effectifs, type et OID (ou nom qualifié). Ni mot de passe,
-ni chaîne de connexion brute, ni SQL ne sont présents dans cette clé.
+`results.lua` garde un buffer `__DBSH__` par session. Le nom d’un buffer est
+dérivé de la clé de son registre, jamais d’un libellé plus large : `results.lua`
+suffixe la connexion par une empreinte de l’id de session, `definitions.lua`
+suffixe le libellé de l’objet par une empreinte de sa clé. Deux entrées
+distinctes du registre ne peuvent donc pas se disputer un nom et déclencher
+`E95`. `find_buf` récupère aussi un buffer par sa variable locale
+`dbsh_context_id` : un rechargement du plugin vide l’état du module, pas les
+buffers.
+
+`definitions.lua` garde un buffer DDL par identité publique d’objet : backend,
+empreinte publique de la connexion, niveaux effectifs, type et OID (ou nom
+qualifié). Ni mot de passe, ni chaîne de connexion brute, ni SQL ne sont
+présents dans cette clé.
 
 Les définitions conservent le snapshot capturé à l’ouverture. Le slot
 `definition` d’`exec.lua` utilise donc ce contexte même si l’utilisateur change
