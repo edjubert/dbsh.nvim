@@ -138,6 +138,64 @@ function M.parse_raw(stdout)
 	return decoded
 end
 
+local READ_METHODS = {
+	find = true, findOne = true, countDocuments = true, estimatedDocumentCount = true,
+	aggregate = true, distinct = true, getIndexes = true, explain = true, stats = true,
+	listCollections = true,
+}
+
+local CHAIN_METHODS = {
+	limit = true, skip = true, sort = true, project = true, toArray = true, pretty = true,
+	hint = true, explain = true, count = true, itcount = true, batchSize = true,
+	collation = true, allowDiskUse = true, maxTimeMS = true, readPref = true,
+}
+
+local function strip_literals(text)
+	local out, index = {}, 1
+	while index <= #text do
+		local char = text:sub(index, index)
+		if char == '"' or char == "'" or char == string.char(96) then
+			index = index + 1
+			while index <= #text do
+				local inner = text:sub(index, index)
+				if inner == "\\" then index = index + 2
+				elseif inner == char then index = index + 1; break
+				else index = index + 1 end
+			end
+			table.insert(out, '""')
+		else
+			table.insert(out, char)
+			index = index + 1
+		end
+	end
+	return table.concat(out)
+end
+
+local function called_methods(text)
+	local names = {}
+	for name in text:gmatch("[%.%s]([%a_][%w_]*)%s*%(") do table.insert(names, name) end
+	return names
+end
+
+function M.classify(text)
+	local stripped = strip_literals(vim.trim(text or ""))
+	if stripped == "" then return { action = "confirm", reason = "javascript" } end
+	stripped = stripped:gsub(";%s*$", "")
+	if stripped:find(";", 1, true) then return { action = "confirm", reason = "multiple_statements" } end
+	if stripped:find("=>", 1, true) or stripped:find("function", 1, true)
+		or stripped:find("[^=!<>]=[^=]") then
+		return { action = "confirm", reason = "javascript" }
+	end
+	local names = called_methods(stripped)
+	if #names == 0 or not READ_METHODS[names[1]] then
+		return { action = "confirm", reason = "javascript" }
+	end
+	for index = 2, #names do
+		if not CHAIN_METHODS[names[index]] then return { action = "confirm", reason = "javascript" } end
+	end
+	return { action = "run", reason = "read" }
+end
+
 function M.is_authentication_error(stderr, stdout)
 	local haystack = ((stderr or "") .. "\n" .. (stdout or "")):lower()
 	return haystack:find("authentication failed", 1, true) ~= nil
