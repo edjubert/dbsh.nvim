@@ -791,4 +791,29 @@ T["refuses yanks on a non-tabular backend"] = function()
 	vim.notify, context.backend = original_notify, original_backend
 end
 
+T["reconciles managed PgLS when a buffer receives its filetype after setup"] = function()
+	local lsp = require("dbsh.lsp")
+	local original = lsp.reconcile_managed
+	local seen = {}
+	lsp.reconcile_managed = function(bufnr)
+		table.insert(seen, bufnr)
+	end
+
+	dbsh.setup({
+		connections = {
+			local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
+		},
+		default = "local_db",
+		lsp = { mode = "managed" },
+	})
+
+	local buf = vim.api.nvim_create_buf(false, true)
+	seen = {}
+	vim.api.nvim_exec_autocmds("FileType", { buffer = buf })
+
+	lsp.reconcile_managed = original
+	eq(seen, { buf })
+	vim.api.nvim_buf_delete(buf, { force = true })
+end
+
 return T

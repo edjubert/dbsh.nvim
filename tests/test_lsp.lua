@@ -59,6 +59,14 @@ local function setup_with(lsp_opts, connection)
 	return context.snapshot(0)
 end
 
+-- The managed client only attaches to buffers of the backend's filetype, so a
+-- bare scratch buffer would be refused before any pooling logic runs.
+local function sql_buf()
+	local buf = vim.api.nvim_create_buf(false, true)
+	vim.bo[buf].filetype = "sql"
+	return buf
+end
+
 local function managed_snapshot(bufnr, opts)
 	local snapshot = setup_with(opts or { mode = "managed" }, {
 		search_path = { "extensions", "public" },
@@ -140,7 +148,7 @@ end
 
 T["external invalidation stays targeted to user-owned clients"] = function()
 	local client = fake_client(1)
-	local buf = vim.api.nvim_create_buf(false, true)
+	local buf = sql_buf()
 	lsp._clients = function() return { client } end
 	lsp._buffers = function() return { buf } end
 
@@ -189,7 +197,7 @@ T["derives distinct public managed keys and prepends the selected schema"] = fun
 end
 
 T["starts one managed client per key and sends the strict context request"] = function()
-	local buf = vim.api.nvim_create_buf(false, true)
+	local buf = sql_buf()
 	local snapshot = managed_snapshot(buf)
 	local client = fake_client(42, "dbsh_pgls")
 	local starts, attachments, requests
@@ -233,7 +241,7 @@ T["starts one managed client per key and sends the strict context request"] = fu
 end
 
 T["waits for client initialization before sending database context"] = function()
-	local buf = vim.api.nvim_create_buf(false, true)
+	local buf = sql_buf()
 	local snapshot = managed_snapshot(buf)
 	local client = fake_client(42)
 	client.initialized = false
@@ -261,8 +269,8 @@ T["waits for client initialization before sending database context"] = function(
 end
 
 T["reuses a managed client for equal keys and tracks both buffers"] = function()
-	local first = vim.api.nvim_create_buf(false, true)
-	local second = vim.api.nvim_create_buf(false, true)
+	local first = sql_buf()
+	local second = sql_buf()
 	local snapshot = managed_snapshot(first)
 	local same_context = vim.deepcopy(snapshot)
 	same_context.bufnr = second
@@ -292,7 +300,7 @@ T["reuses a managed client for equal keys and tracks both buffers"] = function()
 end
 
 T["managed invalidation affects only the pooled client for the snapshot"] = function()
-	local buf = vim.api.nvim_create_buf(false, true)
+	local buf = sql_buf()
 	local snapshot = managed_snapshot(buf)
 	local client = fake_client(42)
 	local requested = {}
@@ -334,7 +342,7 @@ T["does not start managed PgLS for a non-PostgreSQL snapshot"] = function()
 end
 
 T["stops an incompatible PgLS binary without a legacy fallback"] = function()
-	local buf = vim.api.nvim_create_buf(false, true)
+	local buf = sql_buf()
 	local snapshot = managed_snapshot(buf)
 	local client = fake_client(42)
 	local stopped, notices = {}, 0
@@ -364,7 +372,7 @@ end
 
 T["passes an absolute patched binary command unchanged without exposing it in status"] = function()
 	local command = { "/tmp/pgls/postgres-language-server", "lsp-proxy" }
-	local buf = vim.api.nvim_create_buf(false, true)
+	local buf = sql_buf()
 	local snapshot = managed_snapshot(buf, { mode = "managed", command = command })
 	local client = fake_client(42)
 	local started
@@ -406,8 +414,8 @@ T["dispatches context changes by mode without mixing external and managed client
 end
 
 T["reconciles a changed buffer context without stopping a shared client"] = function()
-	local first = vim.api.nvim_create_buf(false, true)
-	local second = vim.api.nvim_create_buf(false, true)
+	local first = sql_buf()
+	local second = sql_buf()
 	local original = managed_snapshot(first)
 	local shared = vim.deepcopy(original)
 	shared.bufnr = second
@@ -455,7 +463,7 @@ T["reconciles a changed buffer context without stopping a shared client"] = func
 end
 
 T["keeps an unchanged managed key attached once"] = function()
-	local buf = vim.api.nvim_create_buf(false, true)
+	local buf = sql_buf()
 	local snapshot = managed_snapshot(buf)
 	local starts, attached = 0, 0
 	lsp.start_client = function()
@@ -480,7 +488,9 @@ T["keeps an unchanged managed key attached once"] = function()
 end
 
 T["normalizes the current buffer before tracking a managed reference"] = function()
-	local buf = vim.api.nvim_get_current_buf()
+	local previous = vim.api.nvim_get_current_buf()
+	local buf = sql_buf()
+	vim.api.nvim_set_current_buf(buf)
 	local snapshot = managed_snapshot(buf)
 	local attached
 	lsp.start_client = function() return fake_client(42) end
@@ -495,13 +505,15 @@ T["normalizes the current buffer before tracking a managed reference"] = functio
 
 	lsp.reconcile_managed(0, snapshot)
 
+	vim.api.nvim_set_current_buf(previous)
 	eq(attached, buf)
 	eq(lsp.status().clients[1].buffers, { buf })
+	vim.api.nvim_buf_delete(buf, { force = true })
 end
 
 T["stops only after the last immediate managed reference detaches"] = function()
-	local first = vim.api.nvim_create_buf(false, true)
-	local second = vim.api.nvim_create_buf(false, true)
+	local first = sql_buf()
+	local second = sql_buf()
 	local snapshot = managed_snapshot(first)
 	local shared = vim.deepcopy(snapshot)
 	shared.bufnr = second
@@ -535,7 +547,7 @@ T["stops only after the last immediate managed reference detaches"] = function()
 end
 
 T["cancels an idle retirement when a managed buffer reattaches"] = function()
-	local buf = vim.api.nvim_create_buf(false, true)
+	local buf = sql_buf()
 	local snapshot = managed_snapshot(buf, {
 		mode = "managed",
 		client_pool = { strategy = "idle", idle_timeout_ms = 25 },
@@ -575,7 +587,7 @@ T["cancels an idle retirement when a managed buffer reattaches"] = function()
 end
 
 T["keeps session clients until managed shutdown"] = function()
-	local buf = vim.api.nvim_create_buf(false, true)
+	local buf = sql_buf()
 	local snapshot = managed_snapshot(buf, {
 		mode = "managed",
 		client_pool = { strategy = "session", idle_timeout_ms = 0 },
@@ -600,7 +612,7 @@ T["keeps session clients until managed shutdown"] = function()
 end
 
 T["notifies once for repeated failures of the same managed key"] = function()
-	local buf = vim.api.nvim_create_buf(false, true)
+	local buf = sql_buf()
 	local snapshot = managed_snapshot(buf)
 	local notices = 0
 	local original_notify = vim.notify
@@ -652,6 +664,50 @@ T["keeps the schema-cache message handler narrow"] = function()
 
 	vim.lsp.handlers["window/showMessage"] = original_handler
 	eq(seen, { "connection refused" })
+end
+
+T["refuses to attach a managed client to a buffer outside the backend filetype"] = function()
+	local buf = sql_buf()
+	vim.bo[buf].filetype = "markdown"
+	local snapshot = managed_snapshot(buf)
+	local starts, attachments = 0, 0
+	lsp.start_client = function()
+		starts = starts + 1
+		return fake_client(7, "dbsh_pgls")
+	end
+	lsp.attach_client = function()
+		attachments = attachments + 1
+		return true
+	end
+
+	eq(lsp.attach_managed(buf, snapshot), nil)
+	eq(starts, 0)
+	eq(attachments, 0)
+	eq(lsp.status().clients, {})
+	eq(lsp.status().errors, {})
+	vim.api.nvim_buf_delete(buf, { force = true })
+end
+
+T["detaches a managed client when the buffer filetype leaves the backend"] = function()
+	local buf = sql_buf()
+	vim.bo[buf].filetype = "sql"
+	local snapshot = managed_snapshot(buf)
+	local client = fake_client(11, "dbsh_pgls")
+	local detached = {}
+	lsp.start_client = function() return client end
+	lsp.attach_client = function() return true end
+	lsp.detach_client = function(client_id, bufnr)
+		table.insert(detached, { client_id = client_id, bufnr = bufnr })
+		return true
+	end
+
+	eq(lsp.reconcile_managed(buf, snapshot), 11)
+
+	vim.bo[buf].filetype = "markdown"
+	lsp.reconcile_managed(buf, snapshot)
+
+	eq(detached, { { client_id = 11, bufnr = buf } })
+	vim.api.nvim_buf_delete(buf, { force = true })
 end
 
 return T

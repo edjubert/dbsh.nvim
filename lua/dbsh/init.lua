@@ -384,6 +384,19 @@ function M.setup(opts)
 			lsp.on_context_changed(bufnr, context.snapshot(bufnr))
 		end,
 	})
+	-- A buffer only becomes a candidate for the managed client once its
+	-- filetype is known, and for files opened after setup that happens long
+	-- after this point. Without this the pool only ever sees the buffer that
+	-- was current at startup.
+	vim.api.nvim_create_autocmd("FileType", {
+		group = group,
+		callback = function(args)
+			if config.options().lsp.mode == "managed" then
+				lsp.reconcile_managed(args.buf, context.snapshot(args.buf))
+			end
+		end,
+	})
+
 	lsp.on_context_changed(0, context.snapshot(0))
 
 	vim.api.nvim_create_autocmd("LspAttach", {
