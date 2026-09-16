@@ -290,6 +290,30 @@ filters are literal and paged. dbsh's confirmation prompt remains an ergonomic
 guardrail; Snowflake role permissions remain the security authority. Run
 `make snowflake-smoke` to verify a private non-mutating connection locally.
 
+### MongoDB
+
+The MongoDB backend drives `mongosh`. Queries are JavaScript, not SQL.
+
+```lua
+connections = {
+	atlas = {
+		type = "mongo",
+		srv = true,
+		host = "<cluster>.mongodb.net",
+		username = "<username>",
+		database = "<database>",
+		proxy = { host = "127.0.0.1", port = 1080 },
+		password_command = { "security", "find-generic-password", "-s", "dbsh.mongo", "-w" },
+	},
+}
+```
+
+dbsh does not open the tunnel; run `ssh -D 1080 -N <bastion>` yourself. The
+password is injected in memory into a script delivered on standard input, never
+argv or disk. Results are documents, not a table: `:DbYankCell` and
+`:DbYankCSV` refuse. Catalog browsing, table preview, and CSV export are not
+implemented for MongoDB yet.
+
 ## Language server
 
 [postgres-language-server](https://github.com/supabase-community/postgres-language-server)
@@ -627,11 +651,13 @@ connections = {
 }
 ```
 
-`type` defaults to `"postgres"`, which is the only backend implemented today. A
+`type` defaults to `"postgres"`. The implemented backends are `postgres`,
+`snowflake` and `mongo`. A
 backend is a small table under `lua/dbsh/backends/`: it says how to build the
 CLI invocation, what preamble to write, how to parse raw output, how to declare
 a query variable, how to export CSV, and which navigation levels its catalog
-has. Context selectors live in `backend.contexts`; paged object browsers live in
+has. A backend may also compose its whole script, require standard-input
+delivery, classify its own statements, and declare non-tabular output. Context selectors live in `backend.contexts`; paged object browsers live in
 `backend.catalogs`. Everything else — result and definition buffers, the CSV
 yank, scratchpads, variable prompts, and export file handling — is shared and
 knows nothing about any particular database.
