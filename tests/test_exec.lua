@@ -674,4 +674,33 @@ T["arms progress for a definition argv and finishes it"] = function()
 	eq(events[2].outcome, { ok = true })
 end
 
+T["composes a script with the backend preamble by default"] = function()
+	eq(
+		exec.compose_script(postgres, "SELECT 1;", "raw"),
+		postgres.preamble("raw") .. "\n" .. "SELECT 1;" .. "\n"
+	)
+end
+
+T["lets a backend compose its own script"] = function()
+	local captured
+	local composer = {
+		preamble = function() return "UNUSED" end,
+		compose = function(text, mode, connection, runtime)
+			captured = { text = text, mode = mode, connection = connection, runtime = runtime }
+			return "WRAPPED(" .. text .. ")"
+		end,
+	}
+
+	local connection = { host = "cluster.example", username = "analyst" }
+	local runtime = { password = "s3cr3t" }
+	eq(
+		exec.compose_script(composer, "db.users.find()", "pretty", connection, runtime),
+		"WRAPPED(db.users.find())"
+	)
+	eq(captured.text, "db.users.find()")
+	eq(captured.mode, "pretty")
+	eq(captured.connection, connection)
+	eq(captured.runtime, runtime)
+end
+
 return T
