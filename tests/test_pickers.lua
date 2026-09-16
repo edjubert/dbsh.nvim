@@ -90,6 +90,7 @@ local function fake_telescope(selected_entry, typed)
 			new = function(_, opts)
 				return {
 					find = function()
+						cell.prompt_title = opts.prompt_title
 						cell.maps = {}
 						local ok = opts.attach_mappings(buf, function(mode, key, fn)
 							cell.maps[mode .. "|" .. key] = fn
@@ -108,6 +109,123 @@ local function fake_telescope(selected_entry, typed)
 		},
 	}
 	return fake, cell
+end
+
+-- Builds a context from one connection, applies the given levels, then runs
+-- `action` against a telescope stub and answers the picker title it asked for.
+local function picker_title(connection_name, connection, levels, action)
+	config.setup({
+		connections = { [connection_name] = connection },
+		default = connection_name,
+	})
+	context.setup()
+
+	local catalog = require("dbsh.catalog")
+	local original_request, original_telescope = catalog.request, pickers._telescope
+	-- Opens its window, and with it the buffer the pickers will read their
+	-- context from: the levels have to be applied after, not before.
+	local fake, cell = fake_telescope(nil, "")
+	for key, value in pairs(levels) do
+		assert(context.set_level(0, key, value, "test"))
+	end
+	catalog.request = function(_, _, _, callback)
+		callback({ items = {}, next_cursor = nil }, nil)
+	end
+	pickers._telescope = function() return fake end
+
+	action()
+
+	pickers._telescope = original_telescope
+	catalog.request = original_request
+	return cell.prompt_title
+end
+
+T["titles a catalog picker with the connection and the schema"] = function()
+	-- The database repeats the connection name here, so it is left out.
+	local title = picker_title(
+		"heimdall",
+		{ host = "localhost", port = 5432, database = "heimdall", username = "dev" },
+		{ schema = "dashboard" },
+		function() pickers.catalog("tables") end
+	)
+	eq(title, "dbsh tables - heimdall - dashboard")
+end
+
+T["keeps the database in a picker title when it differs from the connection"] = function()
+	local title = picker_title(
+		"prod_ro",
+		{ host = "db.example.com", port = 5432, database = "app", username = "readonly" },
+		{ schema = "dashboard" },
+		function() pickers.catalog("tables") end
+	)
+	eq(title, "dbsh tables - prod_ro - app - dashboard")
+end
+
+T["titles a catalog picker with the scope schema rather than a stale context"] = function()
+	-- No schema in context: choose_scope would ask for one, and the snapshot
+	-- captured before the prompt must not decide the title.
+	local title = picker_title(
+		"local_db",
+		{ host = "localhost", port = 5432, database = "postgres", username = "dev" },
+		{},
+		function()
+			pickers.catalog("tables", { scope = { schema = "dashboard", all_schemas = false } })
+		end
+	)
+	eq(title, "dbsh tables - local_db - postgres - dashboard")
+end
+
+T["omits an unset schema from a picker title"] = function()
+	local title = picker_title(
+		"local_db",
+		{ host = "localhost", port = 5432, database = "postgres", username = "dev" },
+		{},
+		function()
+			pickers.catalog("tables", { scope = { schema = nil, all_schemas = true } })
+		end
+	)
+	eq(title, "dbsh tables - local_db - postgres")
+end
+
+T["titles a context picker with the context it is about to change"] = function()
+	local title = picker_title(
+		"heimdall",
+		{ host = "localhost", port = 5432, database = "heimdall", username = "dev" },
+		{ schema = "dashboard" },
+		function() pickers.context("schema") end
+	)
+	eq(title, "dbsh schemas - heimdall - dashboard")
+end
+
+T["carries the picker title into the UI selector fallback"] = function()
+	config.setup({
+		connections = {
+			heimdall = { host = "localhost", port = 5432, database = "heimdall", username = "dev" },
+		},
+		default = "heimdall",
+	})
+	context.setup()
+	assert(context.set_level(0, "schema", "dashboard", "test"))
+
+	local catalog = require("dbsh.catalog")
+	local original_request, original_telescope = catalog.request, pickers._telescope
+	local original_select = vim.ui.select
+	catalog.request = function(_, _, _, callback)
+		callback({ items = {}, next_cursor = nil }, nil)
+	end
+	pickers._telescope = function() return nil end
+	local asked
+	vim.ui.select = function(_, opts, callback)
+		asked = opts
+		callback(nil)
+	end
+
+	pickers.catalog("tables")
+
+	vim.ui.select = original_select
+	pickers._telescope = original_telescope
+	catalog.request = original_request
+	eq(asked.prompt, "dbsh tables - heimdall - dashboard: ")
 end
 
 T["answers the highlighted entry even though close fires BufWinLeave"] = function()
