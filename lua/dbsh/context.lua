@@ -287,10 +287,40 @@ function M.detach(bufnr)
 	return previous
 end
 
+local function buffer_project_root(bufnr)
+	if type(bufnr) ~= "number" or not vim.api.nvim_buf_is_valid(bufnr) then
+		return nil
+	end
+	local name = vim.api.nvim_buf_get_name(bufnr)
+	if name == "" then
+		return nil
+	end
+	local directory = vim.fs.dirname(vim.fn.fnamemodify(name, ":p"))
+	local config_path = vim.fs.find("postgres-language-server.jsonc", {
+		path = directory,
+		upward = true,
+		type = "file",
+	})[1]
+	if config_path ~= nil then
+		return vim.fs.dirname(config_path)
+	end
+	local git_path = vim.fs.find(".git", {
+		path = directory,
+		upward = true,
+	})[1]
+	if git_path ~= nil then
+		return vim.fs.dirname(git_path)
+	end
+end
+
 function M.resolved_project_root(snapshot)
 	snapshot = snapshot or M.snapshot(0)
 	if type(snapshot.project_root) == "string" and snapshot.project_root ~= "" then
 		return snapshot.project_root
+	end
+	local root = buffer_project_root(snapshot.bufnr)
+	if root ~= nil then
+		return root
 	end
 	return vim.fs.joinpath(vim.fn.stdpath("data"), "dbsh", "lsp")
 end

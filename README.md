@@ -373,6 +373,9 @@ context dbsh synchronized, or use managed mode when contexts need isolation.
 Managed mode uses one client per public context key: PostgreSQL connection
 identity, effective database, project root, and the resolved search path
 (selected schema first, then the configured `search_path`, deduplicated).
+For ordinary file buffers, the project root is discovered from the nearest
+`postgres-language-server.jsonc`, then from the nearest Git root. An explicit
+scratchpad project root keeps precedence over this discovery.
 Changing one buffer's context detaches only that buffer from its stale client;
 other buffers retain their references.
 
