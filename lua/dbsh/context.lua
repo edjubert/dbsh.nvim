@@ -261,6 +261,7 @@ end
 
 function M.attach(bufnr, value)
 	bufnr = concrete_bufnr(bufnr)
+	local previous = vim.deepcopy(effective(bufnr))
 	local current = vim.deepcopy(value)
 	current.id = current.id or next_id("scratchpad", bufnr)
 	current.kind = current.kind or "scratchpad"
@@ -277,6 +278,7 @@ function M.attach(bufnr, value)
 		or (current.connection and (current.connection.type or "postgres"))
 	current.generation = current.generation or 0
 	state.buffers[bufnr] = current
+	announce(bufnr, "attach", previous, current)
 	return current
 end
 

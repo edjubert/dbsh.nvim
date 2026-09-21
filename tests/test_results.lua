@@ -157,4 +157,47 @@ T["opens a floating window when asked"] = function()
 	eq(vim.api.nvim_win_get_config(win).relative, "editor")
 end
 
+T["focuses the running float so it can be scrolled and closed"] = function()
+	results.running(snapshots.a, "SELECT 1;", { split = "float" })
+	local buf = results.find_buf(snapshots.a)
+	eq(vim.api.nvim_get_current_win(), results.find_win(buf))
+end
+
+T["focuses the float again on a later query of the same session"] = function()
+	-- The window already exists by then, so the branch that creates it never
+	-- runs and cannot be the one that focuses.
+	results.running(snapshots.a, "SELECT 1;", { split = "float" })
+	local buf = results.find_buf(snapshots.a)
+	local win = results.find_win(buf)
+	vim.api.nvim_set_current_win(
+		vim.tbl_filter(function(candidate)
+			return candidate ~= win
+		end, vim.api.nvim_list_wins())[1]
+	)
+
+	results.running(snapshots.a, "SELECT 2;", { split = "float" })
+	eq(vim.api.nvim_get_current_win(), win)
+end
+
+T["leaves the cursor in the query buffer when results open in a split"] = function()
+	local before = vim.api.nvim_get_current_win()
+	results.running(snapshots.a, "SELECT 1;", { split = "horizontal" })
+	eq(vim.api.nvim_get_current_win(), before)
+end
+
+T["never moves the cursor when output arrives"] = function()
+	-- render runs from the CLI callback, long after the user moved on: an
+	-- async focus steal is worse than no focus at all.
+	results.running(snapshots.a, "SELECT 1;", { split = "float" })
+	local buf = results.find_buf(snapshots.a)
+	local win = results.find_win(buf)
+	local elsewhere = vim.tbl_filter(function(candidate)
+		return candidate ~= win
+	end, vim.api.nvim_list_wins())[1]
+	vim.api.nvim_set_current_win(elsewhere)
+
+	results.render(snapshots.a, "SELECT 1;", "one", { split = "float" })
+	eq(vim.api.nvim_get_current_win(), elsewhere)
+end
+
 return T

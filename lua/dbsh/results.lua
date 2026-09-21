@@ -132,8 +132,13 @@ function M.open(snapshot, opts)
 	vim.wo[win].wrap = false
 	vim.wo[win].sidescrolloff = 0
 
+	-- An already-open window is never entered by the branches above, so an
+	-- explicit focus has to be honoured here or only the first query of a
+	-- session would land in the float.
 	if opts.focus == false and vim.api.nvim_win_is_valid(previous_win) then
 		vim.api.nvim_set_current_win(previous_win)
+	elseif opts.focus == true and vim.api.nvim_win_is_valid(win) then
+		vim.api.nvim_set_current_win(win)
 	end
 	return buf, win
 end
@@ -176,8 +181,18 @@ local function without_focus(opts)
 	return vim.tbl_extend("force", opts or {}, { focus = false })
 end
 
+-- A split sits beside the SQL buffer and must not take the cursor: the point
+-- of it is to keep typing. A float covers that buffer instead, and unfocused
+-- it can neither be scrolled nor closed -- its q and <Esc> mappings never
+-- fire. Only this door focuses: M.render runs from the CLI callback, long
+-- after the user moved on, and an async focus steal is worse than none.
+local function initial_focus(opts)
+	opts = opts or {}
+	return vim.tbl_extend("force", opts, { focus = opts.split == "float" })
+end
+
 function M.running(snapshot, query, opts)
-	local buf = M.open(snapshot, without_focus(opts))
+	local buf = M.open(snapshot, initial_focus(opts))
 	local lines = { "# Running..." }
 	vim.list_extend(lines, split_lines(query))
 	table.insert(lines, "")

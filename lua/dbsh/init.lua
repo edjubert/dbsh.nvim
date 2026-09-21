@@ -22,6 +22,35 @@ local function active_snapshot()
 	return results.context_snapshot(0) or context.snapshot(0)
 end
 
+local function notify_sql_connection(bufnr)
+	if not vim.api.nvim_buf_is_valid(bufnr)
+		or vim.bo[bufnr].buftype ~= ""
+		or vim.bo[bufnr].filetype ~= "sql"
+		or vim.api.nvim_buf_get_name(bufnr) == ""
+		or vim.b[bufnr].dbsh_connection_notified then
+		return
+	end
+	local snapshot = context.snapshot(bufnr)
+	if snapshot.connection == nil then
+		return
+	end
+	local database = (snapshot.levels or {}).database or snapshot.connection.database
+	if database == nil or database == "" then
+		return
+	end
+	vim.b[bufnr].dbsh_connection_notified = true
+	local subject = "SQL buffer"
+	if snapshot.kind == "scratchpad" then
+		subject = "scratchpad " .. tostring(snapshot.scratchpad_id or snapshot.id)
+	end
+	vim.notify(string.format(
+		"dbsh.nvim: %s uses %s (database: %s)",
+		subject,
+		snapshot.connection_name or "current connection",
+		database
+	))
+end
+
 function M.last_query(bufnr_or_snapshot)
 	local snapshot
 	if type(bufnr_or_snapshot) == "table" then
@@ -91,7 +120,25 @@ function M.query(sql)
 	run_query(sql, snapshot)
 end
 
+-- Mappings are global, so a query mapping fires just as well from a focused
+-- result float as from the SQL buffer, and the first paragraph there is the
+-- echoed query: reading the buffer would silently re-run it. M.query itself
+-- stays unguarded -- it receives its text and remains callable from anywhere.
+local function reading_own_output()
+	if results.context_snapshot(0) == nil then
+		return false
+	end
+	vim.notify(
+		"dbsh.nvim: this is a result buffer, not a query buffer",
+		vim.log.levels.WARN
+	)
+	return true
+end
+
 function M.query_current_line()
+	if reading_own_output() then
+		return
+	end
 	local lnum = vim.api.nvim_win_get_cursor(0)[1]
 	local line = vim.api.nvim_buf_get_lines(0, lnum - 1, lnum, false)[1]
 	M.query(line)
@@ -112,6 +159,9 @@ function M.paragraph_range(lines, lnum)
 end
 
 function M.query_paragraph()
+	if reading_own_output() then
+		return
+	end
 	local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
 	local lnum = vim.api.nvim_win_get_cursor(0)[1]
 	local start, stop = M.paragraph_range(lines, lnum)
@@ -119,6 +169,9 @@ function M.query_paragraph()
 end
 
 function M.query_selection()
+	if reading_own_output() then
+		return
+	end
 	local mode = vim.fn.mode()
 	local region = vim.fn.getregion(vim.fn.getpos("v"), vim.fn.getpos("."), { type = mode })
 	M.query(table.concat(region, "\n"))
@@ -396,6 +449,19 @@ function M.setup(opts)
 			end
 		end,
 	})
+	vim.api.nvim_create_autocmd({ "FileType", "BufEnter" }, {
+		group = group,
+		callback = function(args)
+			local bufnr = args.buf
+			-- Scratchpads receive their persisted context immediately after
+			-- :edit returns. Waiting for the current event loop avoids reporting
+			-- the fallback connection that was active during filetype detection.
+			vim.schedule(function()
+				notify_sql_connection(bufnr)
+			end)
+		end,
+	})
+	notify_sql_connection(vim.api.nvim_get_current_buf())
 
 	lsp.on_context_changed(0, context.snapshot(0))
 

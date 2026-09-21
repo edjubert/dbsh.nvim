@@ -263,4 +263,28 @@ T["refuses to forget a persistent scratchpad context"] = function()
 	vim.api.nvim_buf_delete(bufnr, { force = true })
 end
 
+T["announces an attached scratchpad context"] = function()
+	local bufnr = vim.api.nvim_create_buf(false, true)
+	local events = {}
+	local group = vim.api.nvim_create_augroup("dbsh_test_attach_events", { clear = true })
+	vim.api.nvim_create_autocmd("User", {
+		pattern = "DbshContextChanged",
+		group = group,
+		callback = function(args) table.insert(events, args.data) end,
+	})
+
+	context.attach(bufnr, {
+		id = "scratchpad:debug",
+		connection_name = "local_db",
+		connection = assert(config.connection("local_db")),
+	})
+
+	vim.api.nvim_del_augroup_by_id(group)
+	eq(#events, 1)
+	eq(events[1].origin, "attach")
+	eq(events[1].current.kind, "scratchpad")
+	eq(events[1].current.connection_name, "local_db")
+	vim.api.nvim_buf_delete(bufnr, { force = true })
+end
+
 return T
