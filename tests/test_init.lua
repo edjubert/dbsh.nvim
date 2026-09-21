@@ -306,6 +306,36 @@ T["renders stderr when psql fails"] = function()
 	eq(vim.tbl_contains(lines, "connection refused"), true)
 end
 
+T["refuses to execute a result buffer"] = function()
+	-- Query mappings are global, so they fire from a focused result float too,
+	-- and its first paragraph is the echoed query: reading the buffer back
+	-- would silently re-run it.
+	local snapshot = context.snapshot(0)
+	local ran = 0
+	exec.runner = function(_, _, on_exit)
+		ran = ran + 1
+		vim.schedule(function()
+			on_exit({ code = 0, stdout = "one", stderr = "" })
+		end)
+		return { kill = function() end }
+	end
+
+	dbsh.query("SELECT 1;")
+	local buf
+	vim.wait(1000, function()
+		buf = results.find_buf(snapshot)
+		return buf ~= nil and vim.api.nvim_buf_get_lines(buf, 0, 1, true)[1] == "SELECT 1;"
+	end)
+
+	local previous = vim.api.nvim_get_current_buf()
+	vim.api.nvim_set_current_buf(buf)
+	dbsh.query_paragraph()
+	dbsh.query_current_line()
+	vim.api.nvim_set_current_buf(previous)
+
+	eq(ran, 1)
+end
+
 T["remembers the last executed query"] = function()
 	exec.runner = function(_, _, on_exit)
 		vim.schedule(function()
@@ -813,6 +843,70 @@ T["reconciles managed PgLS when a buffer receives its filetype after setup"] = f
 
 	lsp.reconcile_managed = original
 	eq(seen, { buf })
+	vim.api.nvim_buf_delete(buf, { force = true })
+end
+
+T["notifies the active database once when a file buffer becomes SQL"] = function()
+	local notifications = {}
+	local original_notify = vim.notify
+	vim.notify = function(message) table.insert(notifications, message) end
+	local buf = vim.api.nvim_create_buf(true, false)
+	vim.api.nvim_buf_set_name(buf, vim.fs.joinpath(vim.fn.tempname(), "query.sql"))
+	local previous = vim.api.nvim_get_current_buf()
+	vim.api.nvim_set_current_buf(buf)
+
+	vim.bo[buf].filetype = "sql"
+	vim.api.nvim_exec_autocmds("FileType", { pattern = "sql" })
+	eq(vim.wait(1000, function() return #notifications == 1 end, 10), true)
+
+	vim.api.nvim_set_current_buf(previous)
+	vim.notify = original_notify
+	eq(notifications, { "dbsh.nvim: SQL buffer uses local_db (database: postgres)" })
+	vim.api.nvim_buf_delete(buf, { force = true })
+end
+
+T["does not notify a database for internal SQL buffers"] = function()
+	local notifications = {}
+	local original_notify = vim.notify
+	vim.notify = function(message) table.insert(notifications, message) end
+	local buf = vim.api.nvim_create_buf(false, true)
+	vim.bo[buf].buftype = "nofile"
+	local previous = vim.api.nvim_get_current_buf()
+	vim.api.nvim_set_current_buf(buf)
+	vim.bo[buf].filetype = "sql"
+	vim.api.nvim_exec_autocmds("FileType", { pattern = "sql" })
+	vim.wait(50)
+
+	vim.api.nvim_set_current_buf(previous)
+	vim.notify = original_notify
+	eq(notifications, {})
+	vim.api.nvim_buf_delete(buf, { force = true })
+end
+
+T["notifies a scratchpad after its persisted context is attached"] = function()
+	local notifications = {}
+	local original_notify = vim.notify
+	vim.notify = function(message) table.insert(notifications, message) end
+	local buf = vim.api.nvim_create_buf(true, false)
+	vim.api.nvim_buf_set_name(buf, vim.fs.joinpath(vim.fn.tempname(), "scratchpad.sql"))
+	local previous = vim.api.nvim_get_current_buf()
+	vim.api.nvim_set_current_buf(buf)
+	vim.bo[buf].filetype = "sql"
+	vim.api.nvim_exec_autocmds("FileType", { pattern = "sql" })
+	context.attach(buf, {
+		id = "scratchpad:debug",
+		scratchpad_id = "debug",
+		kind = "scratchpad",
+		connection_name = "local_db",
+		connection = assert(require("dbsh.config").connection("local_db")),
+		levels = { database = "debug_db" },
+	})
+
+	eq(vim.wait(1000, function() return #notifications == 1 end, 10), true)
+
+	vim.api.nvim_set_current_buf(previous)
+	vim.notify = original_notify
+	eq(notifications, { "dbsh.nvim: scratchpad debug uses local_db (database: debug_db)" })
 	vim.api.nvim_buf_delete(buf, { force = true })
 end
 

@@ -136,11 +136,47 @@ end
 T["resolves a standalone project root and ordered PostgreSQL search path"] = function()
 	local snapshot = context.snapshot(0)
 	snapshot.project_root = nil
+	snapshot.bufnr = vim.api.nvim_create_buf(false, true)
 	snapshot.levels.schema = "tenant"
 	snapshot.connection.search_path = { "extensions", "tenant", "public" }
 
 	eq(context.resolved_search_path(snapshot), { "tenant", "extensions", "public" })
 	eq(context.resolved_project_root(snapshot), vim.fs.joinpath(vim.fn.stdpath("data"), "dbsh", "lsp"))
+	vim.api.nvim_buf_delete(snapshot.bufnr, { force = true })
+end
+
+T["resolves the nearest PgLS configuration for an ordinary file buffer"] = function()
+	local root = vim.fn.tempname()
+	local nested = vim.fs.joinpath(root, "transformation", "staging")
+	local sql_path = vim.fs.joinpath(nested, "query.sql")
+	vim.fn.mkdir(nested, "p")
+	vim.fn.writefile({ "{}" }, vim.fs.joinpath(root, "postgres-language-server.jsonc"))
+	vim.fn.writefile({ "select 1;" }, sql_path)
+
+	local bufnr = vim.fn.bufadd(sql_path)
+	local snapshot = context.snapshot(bufnr)
+
+	eq(context.resolved_project_root(snapshot), vim.fn.resolve(root))
+
+	vim.api.nvim_buf_delete(bufnr, { force = true })
+	vim.fn.delete(root, "rf")
+end
+
+T["falls back to the nearest Git root for an ordinary file buffer"] = function()
+	local root = vim.fn.tempname()
+	local nested = vim.fs.joinpath(root, "queries")
+	local sql_path = vim.fs.joinpath(nested, "query.sql")
+	vim.fn.mkdir(vim.fs.joinpath(root, ".git"), "p")
+	vim.fn.mkdir(nested, "p")
+	vim.fn.writefile({ "select 1;" }, sql_path)
+
+	local bufnr = vim.fn.bufadd(sql_path)
+	local snapshot = context.snapshot(bufnr)
+
+	eq(context.resolved_project_root(snapshot), vim.fn.resolve(root))
+
+	vim.api.nvim_buf_delete(bufnr, { force = true })
+	vim.fn.delete(root, "rf")
 end
 
 T["emits redacted public data for context changes and the legacy event once"] = function()
@@ -224,6 +260,30 @@ T["refuses to forget a persistent scratchpad context"] = function()
 	eq(current, nil)
 	expect_match(err, "persistent")
 
+	vim.api.nvim_buf_delete(bufnr, { force = true })
+end
+
+T["announces an attached scratchpad context"] = function()
+	local bufnr = vim.api.nvim_create_buf(false, true)
+	local events = {}
+	local group = vim.api.nvim_create_augroup("dbsh_test_attach_events", { clear = true })
+	vim.api.nvim_create_autocmd("User", {
+		pattern = "DbshContextChanged",
+		group = group,
+		callback = function(args) table.insert(events, args.data) end,
+	})
+
+	context.attach(bufnr, {
+		id = "scratchpad:debug",
+		connection_name = "local_db",
+		connection = assert(config.connection("local_db")),
+	})
+
+	vim.api.nvim_del_augroup_by_id(group)
+	eq(#events, 1)
+	eq(events[1].origin, "attach")
+	eq(events[1].current.kind, "scratchpad")
+	eq(events[1].current.connection_name, "local_db")
 	vim.api.nvim_buf_delete(bufnr, { force = true })
 end
 

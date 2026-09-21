@@ -46,6 +46,17 @@ distinctes du registre ne peuvent donc pas se disputer un nom et déclencher
 `dbsh_context_id` : un rechargement du plugin vide l’état du module, pas les
 buffers.
 
+Le focus de la fenêtre de résultat est dérivé de `results_split`, il n’a pas
+d’option à lui : un split reste à côté du buffer SQL et ne prend jamais le
+curseur, un flottant le couvre et le prend au lancement de la requête, sinon ses
+mappings `q` et `<Esc>` ne peuvent pas partir. Seule `running` focalise :
+`render` part du callback du CLI, longtemps après que l’utilisateur est passé à
+autre chose, et un vol de focus asynchrone est pire que pas de focus. Les
+entrées qui lisent le buffer courant (`query_paragraph`, `query_current_line`,
+`query_selection`) refusent un buffer `__DBSH__` : les mappings sont globaux et
+le premier paragraphe d’un résultat est la requête recopiée. `M.query` reste
+sans garde, elle reçoit son texte.
+
 `definitions.lua` garde un buffer DDL par identité publique d’objet : backend,
 empreinte publique de la connexion, niveaux effectifs, type et OID (ou nom
 qualifié). Ni mot de passe, ni chaîne de connexion brute, ni SQL ne sont

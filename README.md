@@ -213,7 +213,7 @@ require("dbsh").setup({
 | `credentials.cache_ttl_ms` | `900000` | In-memory credential cache lifetime for backends that require a password command. |
 | `csv_delimiter` | `","` | Column separator, for both CSV export and CSV yank. |
 | `export_dir` | `<stdpath("data")>/dbsh/exports` | Where `:DbExportCSV` suggests writing. |
-| `results_split` | `"horizontal"` | `"horizontal"`, `"vertical"` or `"float"`: which window opens `__DBSH__` in. Only applies the first time the window is created; combine with `vim.opt.splitright = true` for a right-hand split. `"float"` is styled after your telescope config, when installed. |
+| `results_split` | `"horizontal"` | `"horizontal"`, `"vertical"` or `"float"`: which window opens `__DBSH__` in. Only applies the first time the window is created; combine with `vim.opt.splitright = true` for a right-hand split. `"float"` is styled after your telescope config, when installed, and takes the cursor when a query starts -- unfocused it could neither be scrolled nor closed; `q` or `<Esc>` closes it and hands the cursor back. A split never takes the cursor: the point of it is to keep typing. Output arriving never moves the cursor either way. |
 | `variable_patterns` | `{}` | Lua patterns (one capture each) naming SQL variables to prompt for. See [SQL variables](#sql-variables). |
 | `safety` | `{ mode = "confirm" }` | Confirms mutating or ambiguous SQL. Use `{ mode = "off" }` to disable the ergonomic guardrail. |
 | `progress` | `{ enabled = true, delay_ms = 300, summary_width = 60 }` | Reports operations while they run. `delay_ms` is how long dbsh waits before displaying anything; `0` displays immediately. `summary_width` truncates the SQL excerpt. See [Progress indicator](#progress-indicator). |
@@ -373,6 +373,9 @@ context dbsh synchronized, or use managed mode when contexts need isolation.
 Managed mode uses one client per public context key: PostgreSQL connection
 identity, effective database, project root, and the resolved search path
 (selected schema first, then the configured `search_path`, deduplicated).
+For ordinary file buffers, the project root is discovered from the nearest
+`postgres-language-server.jsonc`, then from the nearest Git root. An explicit
+scratchpad project root keeps precedence over this discovery.
 Changing one buffer's context detaches only that buffer from its stale client;
 other buffers retain their references.
 
