@@ -32,12 +32,15 @@ local function concrete_bufnr(bufnr)
 	return bufnr
 end
 
--- The managed client belongs only on buffers written in the backend's own
--- language. Without this gate it lands on whatever buffer happens to be
--- current when the pool is reconciled -- a README, a lua config file -- and
--- decorates it with SQL syntax diagnostics.
+-- The managed client belongs only on normal buffers written in the backend's
+-- own language. Internal result/definition buffers and Telescope previews use
+-- nofile or prompt buftypes; attaching there adds diagnostics and formatting
+-- to UI surfaces rather than editable SQL files.
 local function buffer_speaks_backend(bufnr, snapshot)
 	if not vim.api.nvim_buf_is_valid(bufnr) then
+		return false
+	end
+	if vim.bo[bufnr].buftype ~= "" then
 		return false
 	end
 	local backend = context.backend(snapshot)
@@ -332,26 +335,29 @@ local function method_not_found(err)
 	return type(err.message) == "string" and err.message:lower():find("method not found", 1, true) ~= nil
 end
 
-local function database_context_payload(snapshot)
+local function configuration_overrides_payload(snapshot)
 	local connection = snapshot.connection
 	return {
-		context = {
-			connection = {
+		overrides = {
+			db = {
 				host = connection.host,
 				port = connection.port,
 				username = connection.username,
 				password = connection.password,
 				database = effective_database(snapshot),
+				disableConnection = false,
 			},
-			searchPath = context.resolved_search_path(snapshot),
+			typecheck = {
+				searchPath = context.resolved_search_path(snapshot),
+			},
 		},
 	}
 end
 
 local function configure_managed(record, snapshot, opts)
 	record.state = "starting"
-	local payload = database_context_payload(snapshot)
-	local requested = M.request(record.client, "pgls/setDatabaseContext", payload, function(err)
+	local payload = configuration_overrides_payload(snapshot)
+	local requested = M.request(record.client, "pgls/set_configuration_overrides", payload, function(err)
 		if err == nil then
 			clear_error(record.key)
 			return
@@ -359,21 +365,16 @@ local function configure_managed(record, snapshot, opts)
 		if method_not_found(err) then
 			local failed = public_record(record)
 			failed.state = "failed"
-			failed.last_error = "managed mode requires a PgLS build with pgls/setDatabaseContext"
+			failed.last_error = "managed mode requires PgLS 0.26.0 or newer"
 			state.failures[record.key] = failed
 			stop_record(record)
-			record_error(
-				record.key,
-				"managed mode requires a PgLS build with pgls/setDatabaseContext",
-				opts,
-				snapshot
-			)
+			record_error(record.key, "managed mode requires PgLS 0.26.0 or newer", opts, snapshot)
 			return
 		end
-		record_error(record.key, "managed PgLS database context request failed", opts, snapshot)
+		record_error(record.key, "managed PgLS configuration overrides request failed", opts, snapshot)
 	end)
 	if requested == false then
-		record_error(record.key, "managed PgLS database context request failed", opts, snapshot)
+		record_error(record.key, "managed PgLS configuration overrides request failed", opts, snapshot)
 	end
 end
 

@@ -153,17 +153,16 @@ statut doit rappeler la limitation **last-synchronized context wins**.
 Le chemin `managed` ne concerne que PostgreSQL. Il possède les clients natifs
 Neovim, indexés par l’empreinte publique de connexion, la base effective, la
 racine de projet et le `search_path` résolu. Le mot de passe reste en mémoire et
-ne transite que par `pgls/setDatabaseContext`; il ne doit jamais apparaître dans
-une clé, un statut, une notification, un log ou une configuration persistée.
+ne transite que par `pgls/set_configuration_overrides`; il ne doit jamais
+apparaître dans une clé, un statut, une notification, un log ou une
+configuration persistée.
 Les stratégies de pool sont `immediate`, `idle` et `session`. La réconciliation
 de contexte ne détache que les clients gérés, et réinitialise uniquement leur
 namespace de diagnostics.
 
-`DbLspStatus` affiche seulement l’état public du contexte actif. Le protocole
-requiert une version de PgLS contenant `pgls/setDatabaseContext`: livrer/merger
-d’abord cette évolution PgLS, puis dbsh. Un binaire local patché via
-`lsp.command` est autorisé uniquement pour le développement et la revue, jamais
-dans une configuration partagée.
+`DbLspStatus` affiche seulement l’état public du contexte actif. Le mode géré
+requiert PgLS 0.26.0 ou plus récent et utilise sa couche officielle de
+surcharges persistantes. Aucun binaire patché n’est requis.
 
 Les commits suivent Conventional Commits, en anglais.
 

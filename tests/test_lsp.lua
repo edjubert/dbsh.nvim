@@ -59,10 +59,10 @@ local function setup_with(lsp_opts, connection)
 	return context.snapshot(0)
 end
 
--- The managed client only attaches to buffers of the backend's filetype, so a
--- bare scratch buffer would be refused before any pooling logic runs.
+-- Managed clients belong to normal files, including persisted dbsh
+-- scratchpads. Internal nofile/prompt buffers are intentionally excluded.
 local function sql_buf()
-	local buf = vim.api.nvim_create_buf(false, true)
+	local buf = vim.api.nvim_create_buf(true, false)
 	vim.bo[buf].filetype = "sql"
 	return buf
 end
@@ -196,7 +196,7 @@ T["derives distinct public managed keys and prepends the selected schema"] = fun
 	eq(vim.inspect(lsp.client_key(snapshot)):find("never%-send"), nil)
 end
 
-T["starts one managed client per key and sends the strict context request"] = function()
+T["starts one managed client per key and sends official configuration overrides"] = function()
 	local buf = sql_buf()
 	local snapshot = managed_snapshot(buf)
 	local client = fake_client(42, "dbsh_pgls")
@@ -221,26 +221,29 @@ T["starts one managed client per key and sends the strict context request"] = fu
 	eq(starts.root_dir, "/work/project")
 	eq(starts.name:find(lsp.client_key(snapshot):sub(1, 12), 1, true) ~= nil, true)
 	eq(attachments, { client_id = 42, bufnr = buf })
-	eq(requests.method, "pgls/setDatabaseContext")
+	eq(requests.method, "pgls/set_configuration_overrides")
 	eq(requests.params, {
-		context = {
-			connection = {
+		overrides = {
+			db = {
 				host = "localhost",
 				port = 5432,
 				username = "dev",
 				password = "never-send",
 				database = "postgres",
+				disableConnection = false,
 			},
-			searchPath = { "tenant", "extensions", "public" },
+			typecheck = {
+				searchPath = { "tenant", "extensions", "public" },
+			},
 		},
 	})
-	eq(requests.params.context.connection.connectionString, nil)
-	eq(requests.params.context.connection.role, nil)
+	eq(requests.params.overrides.db.connectionString, nil)
+	eq(requests.params.overrides.db.role, nil)
 	eq(vim.inspect(lsp.status()):find("never%-send"), nil)
 	vim.api.nvim_buf_delete(buf, { force = true })
 end
 
-T["waits for client initialization before sending database context"] = function()
+T["waits for client initialization before sending configuration overrides"] = function()
 	local buf = sql_buf()
 	local snapshot = managed_snapshot(buf)
 	local client = fake_client(42)
@@ -253,7 +256,7 @@ T["waits for client initialization before sending database context"] = function(
 	lsp.attach_client = function() return true end
 	lsp.request = function(_, method, _, handler)
 		requests = (requests or 0) + 1
-		eq(method, "pgls/setDatabaseContext")
+		eq(method, "pgls/set_configuration_overrides")
 		handler(nil, nil)
 		return true
 	end
@@ -318,7 +321,7 @@ T["managed invalidation affects only the pooled client for the snapshot"] = func
 	lsp.attach_managed(buf, snapshot)
 	lsp.invalidate(snapshot)
 
-	eq(requested[1].method, "pgls/setDatabaseContext")
+	eq(requested[1].method, "pgls/set_configuration_overrides")
 	eq(requested[2].method, "workspace/executeCommand")
 	eq(requested[2].params.command, "pgls.invalidateSchemaCache")
 	eq(requested[3].method, "textDocument/completion")
@@ -341,7 +344,7 @@ T["does not start managed PgLS for a non-PostgreSQL snapshot"] = function()
 	eq(starts, 0)
 end
 
-T["stops an incompatible PgLS binary without a legacy fallback"] = function()
+T["stops a pre-0.26 PgLS binary without a legacy fallback"] = function()
 	local buf = sql_buf()
 	local snapshot = managed_snapshot(buf)
 	local client = fake_client(42)
@@ -356,7 +359,7 @@ T["stops an incompatible PgLS binary without a legacy fallback"] = function()
 	vim.notify = function(message, level)
 		if level == vim.log.levels.WARN then
 			notices = notices + 1
-			expect_match(message, "requires a PgLS build")
+			expect_match(message, "requires PgLS 0.26.0 or newer")
 		end
 	end
 
@@ -370,7 +373,7 @@ T["stops an incompatible PgLS binary without a legacy fallback"] = function()
 	vim.api.nvim_buf_delete(buf, { force = true })
 end
 
-T["passes an absolute patched binary command unchanged without exposing it in status"] = function()
+T["passes an absolute binary command unchanged without exposing it in status"] = function()
 	local command = { "/tmp/pgls/postgres-language-server", "lsp-proxy" }
 	local buf = sql_buf()
 	local snapshot = managed_snapshot(buf, { mode = "managed", command = command })
@@ -685,6 +688,28 @@ T["refuses to attach a managed client to a buffer outside the backend filetype"]
 	eq(attachments, 0)
 	eq(lsp.status().clients, {})
 	eq(lsp.status().errors, {})
+	vim.api.nvim_buf_delete(buf, { force = true })
+end
+
+T["refuses to attach a managed client to an internal SQL buffer"] = function()
+	local buf = vim.api.nvim_create_buf(false, true)
+	vim.bo[buf].filetype = "sql"
+	local snapshot = managed_snapshot(buf)
+	local starts, attachments = 0, 0
+	lsp.start_client = function()
+		starts = starts + 1
+		return fake_client(7, "dbsh_pgls")
+	end
+	lsp.attach_client = function()
+		attachments = attachments + 1
+		return true
+	end
+
+	eq(vim.bo[buf].buftype, "nofile")
+	eq(lsp.attach_managed(buf, snapshot), nil)
+	eq(starts, 0)
+	eq(attachments, 0)
+	eq(lsp.status().clients, {})
 	vim.api.nvim_buf_delete(buf, { force = true })
 end
 

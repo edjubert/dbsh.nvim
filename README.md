@@ -384,32 +384,20 @@ other buffers retain their references.
 retains the client until Neovim exits.
 
 The password remains in dbsh memory and is sent only in the
-`pgls/setDatabaseContext` session RPC. It is never put in the spawned command,
-environment, public client key, status output, notification, or persisted dbsh
-state. If starting or configuring PgLS fails, SQL execution remains unaffected;
-dbsh stores a sanitized per-context error and notifies once by default. Set
-`lsp.notifications.failures = false` to suppress that notification.
+`pgls/set_configuration_overrides` session RPC. It is never put in the spawned
+command, environment, public client key, status output, notification, or
+persisted dbsh state. If starting or configuring PgLS fails, SQL execution
+remains unaffected; dbsh stores a sanitized per-context error and notifies once
+by default. Set `lsp.notifications.failures = false` to suppress that
+notification.
 
 `:DbLspStatus` reports the active public managed record or, in external mode,
 the user-owned/shared limitation and its last synchronized public context.
 
-Managed mode requires a PgLS binary containing `pgls/setDatabaseContext`. It is
-not available in an unpatched PgLS release. Roll out the PgLS protocol change
-first, then dbsh, and test against a merged or released PgLS binary before
-release.
-
-Until PgLS ships that request, development and review can build the companion
-[upstream PgLS context RPC pull request](https://github.com/supabase-community/postgres-language-server/pull/794):
-
-```bash
-git clone https://github.com/supabase-community/postgres-language-server.git
-cd postgres-language-server
-gh pr checkout 794
-cargo build --release
-```
-
-Point `lsp.command` at the locally built binary only; do not put a
-machine-specific path in shared configuration.
+Managed mode requires PgLS 0.26.0 or newer. It uses the official sticky
+configuration overrides introduced by
+[PR #809](https://github.com/supabase-community/postgres-language-server/pull/809);
+no patched PgLS binary is required.
 
 ## Commands
 
