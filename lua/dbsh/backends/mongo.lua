@@ -93,7 +93,13 @@ function M.uri(connection, password)
 	if connection.auth == "aws" then
 		table.insert(options, "authMechanism=MONGODB-AWS")
 		table.insert(options, "authSource=" .. percent_encode(connection.auth_source or "$external"))
-		return string.format("%s://%s@%s/?%s", scheme, percent_encode(connection.username),
+		if type(connection.read_preference) == "string" and connection.read_preference ~= "" then
+			table.insert(options, "readPreference=" .. percent_encode(connection.read_preference))
+		end
+		-- The Node.js driver requires a password when a username is present,
+		-- even for MONGODB-AWS where it is unused. A placeholder satisfies the
+		-- parser; the real authentication uses the AWS credentials in the env.
+		return string.format("%s://%s:x@%s/?%s", scheme, percent_encode(connection.username),
 			host, table.concat(options, "&"))
 	end
 	table.insert(options, "authSource=" .. percent_encode(connection.auth_source or "admin"))

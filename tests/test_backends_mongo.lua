@@ -71,12 +71,16 @@ T["builds a safely encoded URI"] = function()
 	expect_match(uri, "proxyHost=127%.0%.0%.1")
 end
 
-T["builds a MONGODB-AWS URI without password"] = function()
+T["builds a MONGODB-AWS URI with placeholder password"] = function()
 	local uri = mongo.uri(aws_profile(), nil)
-	expect_match(uri, "^mongodb%+srv://arn%%3Aaws%%3Aiam%%3A%%3A123456789012%%3Arole%%2Fmongodb%-read@")
+	expect_match(uri, "^mongodb%+srv://arn%%3Aaws%%3Aiam%%3A%%3A123456789012%%3Arole%%2Fmongodb%-read:x@")
 	expect_match(uri, "authMechanism=MONGODB%-AWS")
 	expect_match(uri, "authSource=%%24external")
-	eq(uri:find(":", uri:find("@") + 1, true), nil)
+end
+
+T["builds a MONGODB-AWS URI with read preference"] = function()
+	local uri = mongo.uri(aws_profile({ read_preference = "secondary" }), nil)
+	expect_match(uri, "readPreference=secondary")
 end
 
 T["never puts the password in argv or environment"] = function()
