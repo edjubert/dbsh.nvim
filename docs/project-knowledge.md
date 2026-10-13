@@ -161,8 +161,8 @@ de contexte ne détache que les clients gérés, et réinitialise uniquement leu
 namespace de diagnostics.
 
 `DbLspStatus` affiche seulement l’état public du contexte actif. Le mode géré
-requiert PgLS 0.26.0 ou plus récent et utilise sa couche officielle de
-surcharges persistantes. Aucun binaire patché n’est requis.
+requiert PgLS 0.26.0 ou plus récent (testé avec 0.28.1) et utilise sa couche
+officielle de surcharges persistantes. Aucun binaire patché n’est requis.
 
 Les commits suivent Conventional Commits, en anglais.
 

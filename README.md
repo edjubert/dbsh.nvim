@@ -394,8 +394,8 @@ notification.
 `:DbLspStatus` reports the active public managed record or, in external mode,
 the user-owned/shared limitation and its last synchronized public context.
 
-Managed mode requires PgLS 0.26.0 or newer. It uses the official sticky
-configuration overrides introduced by
+Managed mode requires PgLS 0.26.0 or newer (tested with 0.28.1). It uses the
+official sticky configuration overrides introduced by
 [PR #809](https://github.com/supabase-community/postgres-language-server/pull/809);
 no patched PgLS binary is required.
 
