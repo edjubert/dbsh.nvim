@@ -499,6 +499,7 @@ function M.setup(opts)
 		group = group,
 		callback = function()
 			credentials.clear()
+			require("dbsh.aws").clear()
 		end,
 	})
 

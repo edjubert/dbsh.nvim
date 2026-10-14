@@ -13,7 +13,7 @@ M.tabular = false
 M.contexts = {}
 M.catalogs = {}
 
-local required_fields = { "host", "username", "database" }
+local required_fields = { "host", "database" }
 
 local function valid_argv(argv)
 	if type(argv) ~= "table" or #argv == 0 then return false end
@@ -32,12 +32,6 @@ local function valid_proxy(proxy)
 		and valid_port(proxy.port)
 end
 
-local function valid_aws_profile(connection)
-	return type(connection.aws_profile) == "string" and connection.aws_profile ~= ""
-		and type(connection.aws_account_id) == "string" and connection.aws_account_id ~= ""
-		and type(connection.aws_role_name) == "string" and connection.aws_role_name ~= ""
-end
-
 function M.validate(connection)
 	if type(connection) ~= "table" then return nil, "Mongo profile must be a table" end
 	if connection.password ~= nil then return nil, "Mongo profile must not provide a password" end
@@ -52,19 +46,25 @@ function M.validate(connection)
 	if connection.srv ~= true and not valid_port(connection.port) then
 		return nil, "Mongo profile requires a valid port unless srv is true"
 	end
-	if not valid_proxy(connection.proxy) then
-		return nil, "Mongo profile requires proxy = { host, port }; start one with ssh -D <port> <bastion>"
+	if connection.proxy ~= nil and not valid_proxy(connection.proxy) then
+		return nil, "Mongo profile proxy must be { host, port }; start one with ssh -D <port> <bastion>"
 	end
 	if connection.auth == "aws" then
 		if connection.password_command ~= nil then
 			return nil, "Mongo profile with auth=aws must not provide password_command"
 		end
-		if not valid_aws_profile(connection) then
-			return nil, "Mongo profile with auth=aws requires aws_profile, aws_account_id and aws_role_name"
+		if type(connection.aws_profile) ~= "string" or connection.aws_profile == "" then
+			return nil, "Mongo profile with auth=aws requires aws_profile"
+		end
+		if connection.auth_source ~= nil and connection.auth_source ~= "$external" then
+			return nil, "Mongo profile with auth=aws requires auth_source=$external"
 		end
 	elseif connection.auth ~= nil and connection.auth ~= "password" then
 		return nil, "Mongo profile auth must be \"password\" or \"aws\""
 	else
+		if type(connection.username) ~= "string" or connection.username == "" then
+			return nil, "Mongo profile requires a non-empty username"
+		end
 		if not valid_argv(connection.password_command) then
 			return nil, "Mongo profile requires password_command as a non-empty argv list"
 		end
@@ -82,25 +82,24 @@ function M.uri(connection, password)
 	local scheme = connection.srv == true and "mongodb+srv" or "mongodb"
 	local host = connection.host
 	if connection.srv ~= true then host = host .. ":" .. tostring(connection.port) end
-	local options = {
-		"proxyHost=" .. percent_encode(connection.proxy.host),
-		"proxyPort=" .. tostring(connection.proxy.port),
-	}
+	local options = {}
+	if connection.proxy ~= nil then
+		table.insert(options, "proxyHost=" .. percent_encode(connection.proxy.host))
+		table.insert(options, "proxyPort=" .. tostring(connection.proxy.port))
+	end
 	if connection.tls ~= false then table.insert(options, "tls=true") end
 	if type(connection.replica_set) == "string" and connection.replica_set ~= "" then
 		table.insert(options, "replicaSet=" .. percent_encode(connection.replica_set))
 	end
 	if connection.auth == "aws" then
 		table.insert(options, "authMechanism=MONGODB-AWS")
-		table.insert(options, "authSource=" .. percent_encode(connection.auth_source or "$external"))
+		table.insert(options, "authSource=" .. percent_encode("$external"))
 		if type(connection.read_preference) == "string" and connection.read_preference ~= "" then
 			table.insert(options, "readPreference=" .. percent_encode(connection.read_preference))
 		end
-		-- The Node.js driver requires a password when a username is present,
-		-- even for MONGODB-AWS where it is unused. A placeholder satisfies the
-		-- parser; the real authentication uses the AWS credentials in the env.
-		return string.format("%s://%s:x@%s/?%s", scheme, percent_encode(connection.username),
-			host, table.concat(options, "&"))
+		-- AWS URI userinfo means access key and secret key, not an IAM role ARN.
+		-- Omitting it makes mongosh resolve the credentials from its environment.
+		return string.format("%s://%s/?%s", scheme, host, table.concat(options, "&"))
 	end
 	table.insert(options, "authSource=" .. percent_encode(connection.auth_source or "admin"))
 	return string.format("%s://%s:%s@%s/?%s", scheme, percent_encode(connection.username),
@@ -111,14 +110,12 @@ local function credential_key(snapshot)
 	if type(snapshot.connection_name) == "string" and snapshot.connection_name ~= "" then
 		return "mongo:" .. snapshot.connection_name
 	end
-	return table.concat({ "mongo", snapshot.connection.host, snapshot.connection.username }, ":")
+	return table.concat({ "mongo", snapshot.connection.host, snapshot.connection.username or "" }, ":")
 end
 
 local function aws_credential_key(snapshot)
 	local base = credential_key(snapshot)
 	return base .. ":aws:" .. snapshot.connection.aws_profile
-		.. ":" .. snapshot.connection.aws_account_id
-		.. ":" .. snapshot.connection.aws_role_name
 end
 
 function M.prepare(snapshot, options, callback)
@@ -127,13 +124,12 @@ function M.prepare(snapshot, options, callback)
 	if valid == nil then callback(nil, err); return end
 	if connection.auth == "aws" then
 		local key = aws_credential_key(snapshot)
-		aws.resolve(key, connection.aws_profile, connection.aws_account_id, connection.aws_role_name, {
+		return aws.resolve(key, connection.aws_profile, {
 			cache_ttl_ms = ((options or {}).credentials or {}).cache_ttl_ms,
 		}, function(creds, resolve_err)
 			if resolve_err ~= nil then callback(nil, resolve_err); return end
 			callback({ aws = creds, credential_backed = true, credential_key = key }, nil)
 		end)
-		return
 	end
 	local key = credential_key(snapshot)
 	credentials.resolve(key, connection.password_command, {
@@ -142,6 +138,14 @@ function M.prepare(snapshot, options, callback)
 		if resolve_err ~= nil then callback(nil, resolve_err); return end
 		callback({ password = password, credential_backed = true, credential_key = key }, nil)
 	end)
+end
+
+function M.invalidate_credentials(connection, key)
+	if connection.auth == "aws" then
+		aws.invalidate(key)
+	else
+		credentials.invalidate(key)
+	end
 end
 
 function M.preamble() return "" end
@@ -172,8 +176,14 @@ function M.compose(text, mode, connection, runtime)
 	}, "\n")
 end
 
-function M.argv(_, script_path)
-	return { "mongosh", "--nodb", "--quiet", "--norc", "--file", script_path }
+function M.argv(connection, script_path)
+	local argv = { "mongosh", "--nodb", "--quiet", "--norc", "--file", script_path }
+	if connection.auth == "aws" then
+		-- The SDK prioritizes AWS_PROFILE over exported credentials. Remove it
+		-- in the child without changing Neovim's environment or exposing keys.
+		argv = vim.list_extend({ "env", "-u", "AWS_PROFILE", "-u", "AWS_DEFAULT_PROFILE" }, argv)
+	end
+	return argv
 end
 
 function M.env(connection, _, runtime)
@@ -183,7 +193,7 @@ function M.env(connection, _, runtime)
 	return {
 		AWS_ACCESS_KEY_ID = creds.access_key_id,
 		AWS_SECRET_ACCESS_KEY = creds.secret_access_key,
-		AWS_SESSION_TOKEN = creds.session_token,
+		AWS_SESSION_TOKEN = creds.session_token or "",
 	}
 end
 

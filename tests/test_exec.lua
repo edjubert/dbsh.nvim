@@ -4,11 +4,13 @@ local eq, expect_match = helpers.eq, helpers.expect_match
 local config = require("dbsh.config")
 local context = require("dbsh.context")
 local credentials = require("dbsh.credentials")
+local aws = require("dbsh.aws")
 local exec = require("dbsh.exec")
 local postgres = require("dbsh.backends.postgres")
 local progress = require("dbsh.progress")
 
 local original_runner
+local original_aws_runner
 local original_prepare
 local original_postgres_argv
 local original_postgres_env
@@ -30,6 +32,8 @@ local T = MiniTest.new_set({
 			})
 			context.setup()
 			original_runner = exec.runner
+			original_aws_runner = aws.runner
+			aws.clear()
 			original_prepare = postgres.prepare
 			original_postgres_argv = postgres.argv
 			original_postgres_env = postgres.env
@@ -42,6 +46,8 @@ local T = MiniTest.new_set({
 		end,
 		post_case = function()
 			exec.runner = original_runner
+			aws.runner = original_aws_runner
+			aws.clear()
 			for session_id, slots in pairs(exec.slots) do
 				for slot in pairs(slots) do
 					exec.cancel(slot, { id = session_id })
@@ -219,6 +225,47 @@ T["retries once after a recognized credential authentication failure"] = functio
 	callbacks[2]({ code = 0, stdout = "ok", stderr = "" })
 	vim.wait(200, function() return got ~= nil end)
 	eq(got, { code = 0, stdout = "ok" })
+end
+
+T["refreshes the AWS cache before retrying Mongo authentication"] = function()
+	config.setup({
+		connections = {
+			atlas = {
+				type = "mongo", auth = "aws", srv = true, host = "cluster.example.mongodb.net",
+				database = "admin", aws_profile = "TestProfile",
+			},
+		},
+		default = "atlas",
+	})
+	context.setup()
+	local exports, callbacks = 0, {}
+	aws.runner = function(_, _, callback)
+		exports = exports + 1
+		callback({ code = 0, stdout = vim.json.encode({
+			Version = 1, AccessKeyId = "private-key-" .. exports,
+			SecretAccessKey = "private-secret", SessionToken = "private-token",
+		}) })
+	end
+	exec.runner = function(argv, opts, callback)
+		eq(argv, {
+			"env", "-u", "AWS_PROFILE", "-u", "AWS_DEFAULT_PROFILE",
+			"mongosh", "--nodb", "--quiet", "--norc", "--file", "/dev/stdin",
+		})
+		eq(opts.env.AWS_ACCESS_KEY_ID, "private-key-" .. exports)
+		eq(opts.stdin:find("private", 1, true), nil)
+		eq(opts.stdin:find("arn:", 1, true), nil)
+		table.insert(callbacks, callback)
+		return { kill = function() end }
+	end
+	local got
+	exec.run("db.runCommand({ping: 1})", {}, function(code, stdout) got = { code, stdout } end)
+	assert(vim.wait(500, function() return #callbacks == 1 end))
+	callbacks[1]({ code = 1, stdout = "", stderr = "Authentication failed" })
+	assert(vim.wait(500, function() return #callbacks == 2 end))
+	eq(exports, 2)
+	callbacks[2]({ code = 0, stdout = "ok", stderr = "" })
+	assert(vim.wait(500, function() return got ~= nil end))
+	eq(got, { 0, "ok" })
 end
 
 T["does not retry SQL failures that are not authentication failures"] = function()

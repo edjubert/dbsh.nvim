@@ -29,6 +29,14 @@ Un backend non SQL peut déclarer `compose` pour envelopper le texte,
 documentaire. `csv.lua` découpe les cellules sur │, donc les yanks refusent
 explicitement une sortie non tabulaire.
 
+MongoDB accepte `auth = "aws"` avec un `aws_profile` géré par AWS CLI v2.
+`aws.lua` appelle `aws configure export-credentials --format process` :
+il ne lit aucun cache SSO et ne passe aucun token dans l’argv. L’URI
+`MONGODB-AWS` n’a pas de userinfo, car ces champs représenteraient une clé
+d’accès et une clé secrète AWS, pas un ARN IAM. Les credentials sont transmis
+uniquement dans l’environnement du processus enfant, et leur cache respecte
+l’expiration AWS ainsi que le TTL dbsh. Le proxy SOCKS est facultatif.
+
 ## Contextes, résultats et définitions
 
 `config.lua` contient les options et profils déclarés immuables.
@@ -90,6 +98,11 @@ plus joignable depuis l’annulation. L’armement précède `backend.prepare`, 
 couvre l’authentification d’un backend. Seuls un titre et un résumé publics
 atteignent l’indicateur : jamais un argv, jamais un environnement, jamais un
 `runtime`.
+
+Lors d’une erreur d’authentification reconnue, `exec` utilise le hook facultatif
+`backend.invalidate_credentials(connection, key)` avant son unique nouvelle
+tentative. MongoDB invalide ainsi le cache AWS ou le cache des mots de passe
+selon le profil ; les autres backends conservent l’invalidation par défaut.
 
 `exec.compose_script` est le point unique de fabrication du script et reçoit la
 connexion et le runtime. `safety.classify` délègue à `backend.classify` ;

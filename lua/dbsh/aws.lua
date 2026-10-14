@@ -1,7 +1,5 @@
--- AWS SSO credential resolution for MONGODB-AWS authentication.
--- Reads the SSO access token from the AWS CLI cache, exchanges it for
--- temporary role credentials via `aws sso get-role-credentials`, and
--- caches the result in memory. Secrets never touch disk or error messages.
+-- Let the AWS CLI resolve profiles, including SSO and credential_process.
+-- Exported credentials stay in memory; no bearer token is passed in argv.
 
 local M = {}
 
@@ -15,6 +13,10 @@ M._cache = {}
 
 function M.now()
 	return vim.uv.now()
+end
+
+function M.wall_now()
+	return os.time() * 1000
 end
 
 local function valid_cache_ttl(value)
@@ -37,73 +39,52 @@ function M.clear()
 	epoch = epoch + 1
 end
 
-function M._home()
-	return vim.fn.expand("~")
+local function parse_expiration(value)
+	if type(value) ~= "string" then return nil end
+	value = value:gsub("%+00:00$", "Z"):gsub("%.%d+Z$", "Z")
+	local year, month, day, hour, minute, second = value:match(
+		"^(%d%d%d%d)%-(%d%d)%-(%d%d)T(%d%d):(%d%d):(%d%d)Z$"
+	)
+	if year == nil then return nil end
+	year, month, day = tonumber(year), tonumber(month), tonumber(day)
+	hour, minute, second = tonumber(hour), tonumber(minute), tonumber(second)
+	if month < 1 or month > 12 or day < 1 or day > 31
+		or hour > 23 or minute > 59 or second > 59 then return nil end
+	-- UTC civil dates avoid extending a credential's lifetime through local DST.
+	local adjusted_year = year - (month <= 2 and 1 or 0)
+	local era = math.floor(adjusted_year / 400)
+	local year_of_era = adjusted_year - era * 400
+	local adjusted_month = month + (month > 2 and -3 or 9)
+	local day_of_year = math.floor((153 * adjusted_month + 2) / 5) + day - 1
+	local days = era * 146097 + year_of_era * 365 + math.floor(year_of_era / 4)
+		- math.floor(year_of_era / 100) + day_of_year - 719468
+	local timestamp = days * 86400 + hour * 3600 + minute * 60 + second
+	if os.date("!%Y-%m-%dT%H:%M:%SZ", timestamp) ~= value then return nil end
+	return timestamp * 1000
 end
 
-local function sso_cache_dir()
-	return M._home() .. "/.aws/sso/cache"
-end
-
-local function read_profile_section(content, profile)
-	local escaped = profile:gsub("%W", "%%%0")
-	local pattern = "%[profile " .. escaped .. "%](.-)%["
-	return content:match(pattern)
-end
-
-local function read_sso_access_token(profile)
-	local config_path = M._home() .. "/.aws/config"
-	local config_file = io.open(config_path, "r")
-	if config_file == nil then return nil end
-	local content = config_file:read("*a")
-	config_file:close()
-
-	local section = read_profile_section(content, profile)
-	if section == nil then return nil end
-	local start_url = section:match("sso_start_url%s*=%s*(%S+)")
-	local sso_region = section:match("sso_region%s*=%s*(%S+)")
-	if start_url == nil or sso_region == nil then return nil end
-
-	local dir = io.open(sso_cache_dir(), "r")
-	if dir == nil then return nil end
-	dir:close()
-
-	for entry in vim.fs.dir(sso_cache_dir()) do
-		local path = sso_cache_dir() .. "/" .. entry
-		local file = io.open(path, "r")
-		if file ~= nil then
-			local data = file:read("*a")
-			file:close()
-			local ok, parsed = pcall(vim.json.decode, data)
-			if ok and type(parsed) == "table"
-				and parsed.startUrl == start_url
-				and parsed.region == sso_region
-				and type(parsed.accessToken) == "string"
-				and parsed.accessToken ~= "" then
-				return parsed.accessToken, sso_region
-			end
-		end
-	end
-	return nil
-end
-
-local function parse_role_credentials(stdout)
+local function parse_credentials(stdout)
 	local ok, parsed = pcall(vim.json.decode, stdout or "")
 	if not ok or type(parsed) ~= "table" then return nil end
-	local creds = parsed.roleCredentials
-	if type(creds) ~= "table" then return nil end
-	if type(creds.accessKeyId) ~= "string" or creds.accessKeyId == "" then return nil end
-	if type(creds.secretAccessKey) ~= "string" or creds.secretAccessKey == "" then return nil end
-	if type(creds.sessionToken) ~= "string" or creds.sessionToken == "" then return nil end
+	if parsed.Version ~= 1 then return nil end
+	if type(parsed.AccessKeyId) ~= "string" or parsed.AccessKeyId == "" then return nil end
+	if type(parsed.SecretAccessKey) ~= "string" or parsed.SecretAccessKey == "" then return nil end
+	if parsed.SessionToken ~= nil
+		and (type(parsed.SessionToken) ~= "string" or parsed.SessionToken == "") then return nil end
+	local expiration
+	if parsed.Expiration ~= nil then
+		expiration = parse_expiration(parsed.Expiration)
+		if expiration == nil then return nil end
+	end
 	return {
-		access_key_id = creds.accessKeyId,
-		secret_access_key = creds.secretAccessKey,
-		session_token = creds.sessionToken,
-		expiration = creds.expiration,
+		access_key_id = parsed.AccessKeyId,
+		secret_access_key = parsed.SecretAccessKey,
+		session_token = parsed.SessionToken,
+		expiration = expiration,
 	}
 end
 
-function M.resolve(key, profile, account_id, role_name, opts, callback)
+function M.resolve(key, profile, opts, callback)
 	opts = opts or {}
 	if type(key) ~= "string" or key == "" then
 		callback(nil, "aws credential key must be a non-empty string")
@@ -113,15 +94,6 @@ function M.resolve(key, profile, account_id, role_name, opts, callback)
 		callback(nil, "aws profile must be a non-empty string")
 		return nil
 	end
-	if type(account_id) ~= "string" or account_id == "" then
-		callback(nil, "aws account_id must be a non-empty string")
-		return nil
-	end
-	if type(role_name) ~= "string" or role_name == "" then
-		callback(nil, "aws role_name must be a non-empty string")
-		return nil
-	end
-
 	local cache_ttl_ms = opts.cache_ttl_ms or default_cache_ttl_ms
 	if not valid_cache_ttl(cache_ttl_ms) then
 		callback(nil, "aws credential cache TTL must be a positive integer")
@@ -138,35 +110,35 @@ function M.resolve(key, profile, account_id, role_name, opts, callback)
 	cache[key] = nil
 	M._cache[key] = nil
 
-	local access_token, sso_region = read_sso_access_token(profile)
-	if access_token == nil then
-		callback(nil, "no valid SSO session found for profile " .. profile .. "; run aws sso login --profile " .. profile)
-		return nil
-	end
-
 	local resolution_epoch = epoch
 	local version = versions[key] or 0
 	local argv = {
-		"aws", "sso", "get-role-credentials",
-		"--access-token", access_token,
-		"--account-id", account_id,
-		"--role-name", role_name,
-		"--region", sso_region or "eu-west-1",
+		"aws", "configure", "export-credentials",
+		"--profile", profile, "--format", "process",
 	}
-	local ok, handle = pcall(M.runner, argv, { text = true }, function(result)
+	local ok, handle = pcall(M.runner, argv, { text = true, timeout = 30000 }, vim.schedule_wrap(function(result)
 		if result == nil or result.code ~= 0 then
-			callback(nil, "aws sso get-role-credentials failed for profile " .. profile)
+			callback(nil, "aws configure export-credentials failed for profile " .. profile
+				.. "; check access and run aws sso login --profile " .. profile)
 			return
 		end
 
-		local creds = parse_role_credentials(result.stdout)
+		local creds = parse_credentials(result.stdout)
 		if creds == nil then
 			callback(nil, "could not parse aws credentials for profile " .. profile)
 			return
 		end
 
+		local remaining_ms = cache_ttl_ms
+		if creds.expiration ~= nil then
+			remaining_ms = math.min(remaining_ms, creds.expiration - M.wall_now())
+			if remaining_ms <= 0 then
+				callback(nil, "aws credentials have expired for profile " .. profile)
+				return
+			end
+		end
 		if epoch == resolution_epoch and (versions[key] or 0) == version then
-			local expires_at = M.now() + cache_ttl_ms
+			local expires_at = M.now() + remaining_ms
 			cache[key] = {
 				credentials = creds,
 				expires_at = expires_at,
@@ -174,9 +146,9 @@ function M.resolve(key, profile, account_id, role_name, opts, callback)
 			M._cache[key] = { expires_at = expires_at }
 		end
 		callback(creds, nil)
-	end)
+	end))
 	if not ok then
-		callback(nil, "aws sso get-role-credentials failed for profile " .. profile)
+		callback(nil, "aws configure export-credentials failed for profile " .. profile)
 		return nil
 	end
 	return handle
