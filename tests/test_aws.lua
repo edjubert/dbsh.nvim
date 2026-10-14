@@ -2,197 +2,152 @@ local helpers = dofile("tests/helpers.lua")
 local eq, expect_match = helpers.eq, helpers.expect_match
 local aws = require("dbsh.aws")
 
-local original_runner
-local original_home
-
+local original_runner, original_now, original_wall_now
 local T = MiniTest.new_set({
 	hooks = {
 		pre_case = function()
 			aws.clear()
-			original_runner = aws.runner
-			original_home = aws._home
+			original_runner, original_now, original_wall_now = aws.runner, aws.now, aws.wall_now
+			aws.now = function() return 1000 end
+			aws.wall_now = function() return 1791972000000 end -- 2026-10-14T10:00:00Z
 		end,
 		post_case = function()
-			aws.runner = original_runner
-			aws._home = original_home
+			aws.runner, aws.now, aws.wall_now = original_runner, original_now, original_wall_now
 			aws.clear()
 		end,
 	},
 })
 
-local function write_file(path, content)
-	local f = assert(io.open(path, "w"))
-	f:write(content)
-	f:close()
+local function exported(overrides)
+	local value = {
+		Version = 1, AccessKeyId = "AKIAEXAMPLE", SecretAccessKey = "private-secret",
+		SessionToken = "private-token", Expiration = "2026-10-14T11:00:00Z",
+	}
+	for key, field in pairs(overrides or {}) do
+		if field == vim.NIL then value[key] = nil else value[key] = field end
+	end
+	return vim.json.encode(value)
 end
 
-local function fake_sso_cache(tmpdir, start_url, region, token)
-	vim.fn.mkdir(tmpdir .. "/.aws/sso/cache", "p")
-	local config_content = "[profile test]\n"
-		.. "sso_start_url = " .. start_url .. "\n"
-		.. "sso_region = " .. region .. "\n"
-		.. "sso_account_id = 123456789012\n"
-		.. "sso_role_name = test-role\n"
-		.. "\n[profile other]\n"
-		.. "sso_start_url = https://other.awsapps.com/start\n"
-	write_file(tmpdir .. "/.aws/config", config_content)
-	local cache_content = vim.json.encode({
-		startUrl = start_url,
-		region = region,
-		accessToken = token,
-		expiresAt = "2099-01-01T00:00:00Z",
-	})
-	write_file(tmpdir .. "/.aws/sso/cache/abc123.json", cache_content)
-	aws._home = function() return tmpdir end
+local function resolve(opts)
+	local done, creds, err = false, nil, nil
+	aws.resolve("key", "TestProfile", opts or {}, function(c, e)
+		creds, err, done = c, e, true
+	end)
+	assert(vim.wait(500, function() return done end))
+	return creds, err
 end
 
-T["rejects invalid arguments"] = function()
+T["rejects invalid arguments and TTL"] = function()
 	local err
-	aws.resolve("", "profile", "123", "role", {}, function(_, e) err = e end)
-	expect_match(err, "credential key must be a non%-empty string")
-
-	err = nil
-	aws.resolve("key", "", "123", "role", {}, function(_, e) err = e end)
-	expect_match(err, "profile must be a non%-empty string")
-
-	err = nil
-	aws.resolve("key", "profile", "", "role", {}, function(_, e) err = e end)
-	expect_match(err, "account_id must be a non%-empty string")
-
-	err = nil
-	aws.resolve("key", "profile", "123", "", {}, function(_, e) err = e end)
-	expect_match(err, "role_name must be a non%-empty string")
+	aws.resolve("", "profile", {}, function(_, e) err = e end)
+	expect_match(err, "credential key")
+	aws.resolve("key", "", {}, function(_, e) err = e end)
+	expect_match(err, "profile")
+	aws.resolve("key", "profile", { cache_ttl_ms = -1 }, function(_, e) err = e end)
+	expect_match(err, "TTL")
 end
 
-T["reports missing SSO session without leaking details"] = function()
-	aws._home = function() return "/nonexistent-home-aws-test" end
-	local err
-	aws.resolve("key", "no-such-profile", "123", "role", {}, function(_, e) err = e end)
-	expect_match(err, "no valid SSO session")
-	expect_match(err, "aws sso login")
-end
-
-T["resolves and caches credentials from SSO"] = function()
-	local tmpdir = vim.fn.tempname()
-	fake_sso_cache(tmpdir, "https://example.awsapps.com/start", "eu-west-1", "test-token-123")
-
-	local calls = 0
-	aws.runner = function(argv, _, callback)
-		calls = calls + 1
-		eq(argv[1], "aws")
-		eq(argv[2], "sso")
-		eq(argv[3], "get-role-credentials")
-		eq(vim.tbl_contains(argv, "test-token-123"), true)
-		eq(vim.tbl_contains(argv, "123456789012"), true)
-		eq(vim.tbl_contains(argv, "test-role"), true)
-		callback({
-			code = 0,
-			stdout = vim.json.encode({
-				roleCredentials = {
-					accessKeyId = "AKIAEXAMPLE",
-					secretAccessKey = "secret",
-					sessionToken = "token",
-					expiration = 9999999999999,
-				},
-			}),
+T["uses the AWS CLI profile without secrets in argv"] = function()
+	aws.runner = function(argv, opts, callback)
+		eq(argv, {
+			"aws", "configure", "export-credentials", "--profile", "TestProfile", "--format", "process",
 		})
+		eq(opts.timeout, 30000)
+		callback({ code = 0, stdout = exported() })
 		return { kill = function() end }
 	end
-
-	local creds, err
-	aws.resolve("key", "test", "123456789012", "test-role", {}, function(c, e)
-		creds, err = c, e
-	end)
+	local creds, err = resolve()
 	eq(err, nil)
 	eq(creds.access_key_id, "AKIAEXAMPLE")
-	eq(creds.secret_access_key, "secret")
-	eq(creds.session_token, "token")
-	eq(calls, 1)
-
-	-- Second call should hit the cache (callback is scheduled)
-	local creds2
-	aws.resolve("key", "test", "123456789012", "test-role", {}, function(c, e)
-		creds2, err = c, e
-	end)
-	vim.wait(200, function() return creds2 ~= nil end)
-	eq(creds2.access_key_id, "AKIAEXAMPLE")
-	eq(calls, 1)
-
-	vim.fn.delete(tmpdir, "rf")
+	eq(creds.secret_access_key, "private-secret")
+	eq(creds.session_token, "private-token")
+	eq(creds.expiration, 1791975600000)
+	eq(aws._cache.key, { expires_at = 901000 })
 end
 
-T["reports aws cli failure without leaking secrets"] = function()
-	local tmpdir = vim.fn.tempname()
-	fake_sso_cache(tmpdir, "https://example.awsapps.com/start", "eu-west-1", "test-token-123")
-
+T["supports static credentials without token or expiration"] = function()
 	aws.runner = function(_, _, callback)
-		callback({ code = 1, stdout = "", stderr = "UnauthorizedException" })
-		return { kill = function() end }
+		callback({ code = 0, stdout = exported({ SessionToken = vim.NIL, Expiration = vim.NIL }) })
 	end
-
-	local creds, err
-	aws.resolve("key", "test", "123456789012", "test-role", {}, function(c, e)
-		creds, err = c, e
-	end)
-	eq(creds, nil)
-	expect_match(err, "get%-role%-credentials failed")
-	eq(err:find("test%-token%-123", 1, true), nil)
-	eq(err:find("UnauthorizedException", 1, true), nil)
-
-	vim.fn.delete(tmpdir, "rf")
+	local creds, err = resolve()
+	eq(err, nil)
+	eq(creds.session_token, nil)
+	eq(creds.expiration, nil)
 end
 
-T["reports unparseable aws output"] = function()
-	local tmpdir = vim.fn.tempname()
-	fake_sso_cache(tmpdir, "https://example.awsapps.com/start", "eu-west-1", "test-token-123")
-
+T["does not retain credentials beyond AWS expiration"] = function()
+	local calls = 0
 	aws.runner = function(_, _, callback)
-		callback({ code = 0, stdout = "not json", stderr = "" })
-		return { kill = function() end }
+		calls = calls + 1
+		callback({ code = 0, stdout = exported({ Expiration = "2026-10-14T10:00:02+00:00" }) })
 	end
+	resolve()
+	eq(aws._cache.key.expires_at, 3000)
+	resolve()
+	eq(calls, 1)
+	aws.now = function() return 3000 end
+	resolve()
+	eq(calls, 2)
+end
 
-	local creds, err
-	aws.resolve("key", "test", "123456789012", "test-role", {}, function(c, e)
-		creds, err = c, e
-	end)
+T["rejects expired and malformed credentials"] = function()
+	for _, output in ipairs({
+		"not json",
+		exported({ Version = 2 }),
+		exported({ SecretAccessKey = vim.NIL }),
+		exported({ Expiration = "invalid-date" }),
+		exported({ Expiration = "2026-02-30T10:00:00Z" }),
+		exported({ Expiration = "2026-10-14T09:00:00Z" }),
+	}) do
+		aws.runner = function(_, _, callback) callback({ code = 0, stdout = output }) end
+		local creds, err = resolve()
+		eq(creds, nil)
+		eq(type(err), "string")
+		eq(aws._cache.key, nil)
+	end
+end
+
+T["reports CLI failures without echoing credentials"] = function()
+	aws.runner = function(_, _, callback)
+		callback({ code = 1, stdout = exported(), stderr = "ForbiddenException private-secret private-token" })
+	end
+	local creds, err = resolve()
 	eq(creds, nil)
-	expect_match(err, "could not parse")
+	expect_match(err, "export%-credentials failed")
+	expect_match(err, "aws sso login")
+	eq(err:find("private", 1, true), nil)
+	eq(err:find("ForbiddenException", 1, true), nil)
+end
 
-	vim.fn.delete(tmpdir, "rf")
+T["reports a missing CLI without echoing thrown errors"] = function()
+	aws.runner = function() error("private-secret") end
+	local creds, err = resolve()
+	eq(creds, nil)
+	expect_match(err, "export%-credentials failed")
+	eq(err:find("private", 1, true), nil)
 end
 
 T["invalidate forces a fresh resolution"] = function()
-	local tmpdir = vim.fn.tempname()
-	fake_sso_cache(tmpdir, "https://example.awsapps.com/start", "eu-west-1", "test-token-123")
-
 	local calls = 0
 	aws.runner = function(_, _, callback)
 		calls = calls + 1
-		callback({
-			code = 0,
-			stdout = vim.json.encode({
-				roleCredentials = {
-					accessKeyId = "AKIA" .. calls,
-					secretAccessKey = "secret",
-					sessionToken = "token",
-					expiration = 9999999999999,
-				},
-			}),
-		})
-		return { kill = function() end }
+		callback({ code = 0, stdout = exported({ AccessKeyId = "AKIA" .. calls }) })
 	end
-
-	local creds
-	aws.resolve("key", "test", "123456789012", "test-role", {}, function(c) creds = c end)
-	eq(creds.access_key_id, "AKIA1")
-
+	eq(resolve().access_key_id, "AKIA1")
+	eq(resolve().access_key_id, "AKIA1")
 	aws.invalidate("key")
+	eq(resolve().access_key_id, "AKIA2")
+end
 
-	aws.resolve("key", "test", "123456789012", "test-role", {}, function(c) creds = c end)
-	eq(creds.access_key_id, "AKIA2")
-	eq(calls, 2)
-
-	vim.fn.delete(tmpdir, "rf")
+T["invalidating an in-flight request prevents cache repopulation"] = function()
+	local pending, done
+	aws.runner = function(_, _, callback) pending = callback end
+	aws.resolve("key", "TestProfile", {}, function() done = true end)
+	aws.invalidate("key")
+	pending({ code = 0, stdout = exported() })
+	assert(vim.wait(500, function() return done end))
+	eq(aws._cache.key, nil)
 end
 
 return T

@@ -11,7 +11,9 @@ local function profile(overrides)
 		proxy = { host = "127.0.0.1", port = 1080 },
 		password_command = { "password-command", "--profile", "mongo" },
 	}
-	for key, value in pairs(overrides or {}) do connection[key] = value == vim.NIL and nil or value end
+	for key, value in pairs(overrides or {}) do
+		if value == vim.NIL then connection[key] = nil else connection[key] = value end
+	end
 	return connection
 end
 
@@ -25,7 +27,9 @@ local function aws_profile(overrides)
 		aws_account_id = "123456789012",
 		aws_role_name = "mongodb-read",
 	}
-	for key, value in pairs(overrides or {}) do connection[key] = value == vim.NIL and nil or value end
+	for key, value in pairs(overrides or {}) do
+		if value == vim.NIL then connection[key] = nil else connection[key] = value end
+	end
 	return connection
 end
 
@@ -44,13 +48,17 @@ local T = MiniTest.new_set({
 
 T["validates secure Mongo profiles"] = function()
 	eq(mongo.validate(profile()), true)
-	local valid, err = mongo.validate(profile({ proxy = vim.NIL }))
+	eq(mongo.validate(profile({ proxy = vim.NIL })), true)
+	local valid, err = mongo.validate(profile({ proxy = { host = "localhost", port = 0 } }))
 	eq(valid, nil)
 	expect_match(err, "ssh %-D")
 end
 
 T["validates AWS Mongo profiles"] = function()
 	eq(mongo.validate(aws_profile()), true)
+	eq(mongo.validate(aws_profile({
+		username = vim.NIL, aws_account_id = vim.NIL, aws_role_name = vim.NIL, proxy = vim.NIL,
+	})), true)
 
 	local valid, err = mongo.validate(aws_profile({ aws_profile = vim.NIL }))
 	eq(valid, nil)
@@ -63,6 +71,9 @@ T["validates AWS Mongo profiles"] = function()
 	valid, err = mongo.validate(aws_profile({ auth = "oidc" }))
 	eq(valid, nil)
 	expect_match(err, "auth must be")
+	valid, err = mongo.validate(aws_profile({ auth_source = "admin" }))
+	eq(valid, nil)
+	expect_match(err, "auth_source")
 end
 
 T["builds a safely encoded URI"] = function()
@@ -71,11 +82,19 @@ T["builds a safely encoded URI"] = function()
 	expect_match(uri, "proxyHost=127%.0%.0%.1")
 end
 
-T["builds a MONGODB-AWS URI with placeholder password"] = function()
+T["builds a MONGODB-AWS URI without userinfo"] = function()
 	local uri = mongo.uri(aws_profile(), nil)
-	expect_match(uri, "^mongodb%+srv://arn%%3Aaws%%3Aiam%%3A%%3A123456789012%%3Arole%%2Fmongodb%-read:x@")
+	expect_match(uri, "^mongodb%+srv://cluster0%.example%.mongodb%.net/")
+	eq(uri:find("arn", 1, true), nil)
+	eq(uri:find("@", 1, true), nil)
 	expect_match(uri, "authMechanism=MONGODB%-AWS")
 	expect_match(uri, "authSource=%%24external")
+end
+
+T["supports direct Mongo connections without a proxy"] = function()
+	local uri = mongo.uri(aws_profile({ proxy = vim.NIL }), nil)
+	eq(uri:find("proxyHost", 1, true), nil)
+	eq(uri:find("proxyPort", 1, true), nil)
 end
 
 T["builds a MONGODB-AWS URI with read preference"] = function()
@@ -101,6 +120,39 @@ T["passes AWS credentials to mongosh environment"] = function()
 	eq(env.AWS_ACCESS_KEY_ID, "AKIAEXAMPLE")
 	eq(env.AWS_SECRET_ACCESS_KEY, "secret")
 	eq(env.AWS_SESSION_TOKEN, "token")
+	eq(env.AWS_PROFILE, nil)
+	eq(mongo.argv(aws_profile(), "/dev/stdin"), {
+		"env", "-u", "AWS_PROFILE", "-u", "AWS_DEFAULT_PROFILE",
+		"mongosh", "--nodb", "--quiet", "--norc", "--file", "/dev/stdin",
+	})
+end
+
+T["prepares AWS credentials through the selected CLI profile"] = function()
+	local original = aws.runner
+	local done, runtime, err
+	aws.runner = function(argv, _, callback)
+		eq(argv, {
+			"aws", "configure", "export-credentials", "--profile", "TestProfile", "--format", "process",
+		})
+		callback({ code = 0, stdout = vim.json.encode({
+			Version = 1, AccessKeyId = "private-key", SecretAccessKey = "private-secret",
+			SessionToken = "private-token",
+		}) })
+		return { kill = function() end }
+	end
+	local ok, failure = pcall(function()
+		mongo.prepare({ connection = aws_profile(), connection_name = "atlas" }, {}, function(r, e)
+			runtime, err, done = r, e, true
+		end)
+		assert(vim.wait(500, function() return done end))
+		eq(err, nil)
+		eq(runtime.aws.access_key_id, "private-key")
+		eq(aws._cache[runtime.credential_key] ~= nil, true)
+		mongo.invalidate_credentials(aws_profile(), runtime.credential_key)
+		eq(aws._cache[runtime.credential_key], nil)
+	end)
+	aws.runner = original
+	assert(ok, failure)
 end
 
 T["does not pass AWS credentials for password auth"] = function()

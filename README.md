@@ -210,7 +210,7 @@ require("dbsh").setup({
 | `query_timeout` | `30000` | Kills a runaway query, in milliseconds. |
 | `preview_limit` | `10` | `LIMIT` used when previewing a table from the picker. |
 | `catalog_page_size` | `200` | Number of catalog objects fetched per page. |
-| `credentials.cache_ttl_ms` | `900000` | In-memory credential cache lifetime for backends that require a password command. |
+| `credentials.cache_ttl_ms` | `900000` | In-memory credential cache lifetime for password commands and AWS profiles, capped by AWS credential expiration. |
 | `csv_delimiter` | `","` | Column separator, for both CSV export and CSV yank. |
 | `export_dir` | `<stdpath("data")>/dbsh/exports` | Where `:DbExportCSV` suggests writing. |
 | `results_split` | `"horizontal"` | `"horizontal"`, `"vertical"` or `"float"`: which window opens `__DBSH__` in. Only applies the first time the window is created; combine with `vim.opt.splitright = true` for a right-hand split. `"float"` is styled after your telescope config, when installed, and takes the cursor when a query starts -- unfocused it could neither be scrolled nor closed; `q` or `<Esc>` closes it and hands the cursor back. A split never takes the cursor: the point of it is to keep typing. Output arriving never moves the cursor either way. |
@@ -308,11 +308,48 @@ connections = {
 }
 ```
 
-dbsh does not open the tunnel; run `ssh -D 1080 -N <bastion>` yourself. The
+The `proxy` field is optional. When it is configured, dbsh does not open the
+tunnel; run `ssh -D 1080 -N <bastion>` yourself. The
 password is injected in memory into a script delivered on standard input, never
 argv or disk. Results are documents, not a table: `:DbYankCell` and
 `:DbYankCSV` refuse. Catalog browsing, table preview, and CSV export are not
 implemented for MongoDB yet.
+
+### AWS IAM authentication
+
+For Atlas `MONGODB-AWS`, select an AWS CLI profile instead of a password command:
+
+```lua
+connections = {
+	atlas_aws = {
+		type = "mongo",
+		auth = "aws",
+		srv = true,
+		host = "<cluster>.mongodb.net",
+		database = "<database>",
+		aws_profile = "<AWS CLI profile>",
+		read_preference = "secondary", -- optional
+		-- proxy = { host = "127.0.0.1", port = 1080 },
+	},
+}
+```
+
+Use AWS CLI v2 with `aws configure export-credentials` support. For SSO profiles,
+run `aws sso login --profile <profile>` first and ensure that the profile's role
+is assigned to you in Identity Center and authorized in Atlas. The AWS CLI
+resolves the profile; dbsh does not read SSO token files or put bearer tokens in
+process arguments.
+
+The backend uses `authSource=$external` and supplies AWS credentials through the
+child process environment. Do not put an IAM ARN or a placeholder password in
+the URI: AWS URI userinfo represents an access key and secret key. `username`,
+`aws_account_id`, and `aws_role_name` from older profiles are unnecessary; the
+AWS CLI profile chooses the role. Cached credentials expire at the earlier of
+their AWS expiration and `credentials.cache_ttl_ms`. A recognized authentication
+failure invalidates the AWS cache and retries once.
+
+See [the opt-in AWS smoke test](docs/mongo-aws-smoke.md) to verify authentication
+without reading application collections.
 
 ## Language server
 

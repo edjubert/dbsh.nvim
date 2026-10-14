@@ -234,7 +234,11 @@ function M.run(sql, opts, callback)
 					-- Relabel, never restart: the clock must keep running so the
 					-- doubled wait is visible.
 					progress_relabel(snapshot, slot, "re-authenticating")
-					credentials.invalidate(runtime.credential_key)
+					if type(backend.invalidate_credentials) == "function" then
+						backend.invalidate_credentials(snapshot.connection, runtime.credential_key)
+					else
+						credentials.invalidate(runtime.credential_key)
+					end
 					slots = slots_for(snapshot, true)
 					slots[slot] = operation
 					operation.handle = nil
