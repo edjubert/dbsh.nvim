@@ -8,6 +8,8 @@ M.name = "snowflake"
 M.shape = "tabular"
 M.filetype = "sql"
 M.extension = "sql"
+M.csv_mode = "csv"
+M.csv_delimiter = ","
 
 local required_fields = {
 	"host",
@@ -138,6 +140,8 @@ function M.argv(connection, script_path, mode)
 	end
 	if mode == "raw" then
 		vim.list_extend(argv, { "--format", "JSON_EXT" })
+	elseif mode == "csv" then
+		vim.list_extend(argv, { "--format", "CSV" })
 	end
 	vim.list_extend(argv, { "--silent", "--filename", script_path })
 	return argv

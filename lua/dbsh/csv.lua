@@ -72,6 +72,7 @@ end
 function M.escape_field(value, delimiter)
 	local needs_quotes = value:find('"', 1, true) ~= nil
 		or value:find("\n", 1, true) ~= nil
+		or value:find("\r", 1, true) ~= nil
 		or value:find(delimiter, 1, true) ~= nil
 	if not needs_quotes then
 		return value
@@ -89,6 +90,66 @@ function M.to_csv(rows, delimiter)
 		table.insert(lines, table.concat(fields, delimiter))
 	end
 	return table.concat(lines, "\n")
+end
+
+-- EJSON scalar wrappers stay in one cell; arrays remain JSON rather than
+-- multiplying documents into rows. Nested document paths become columns.
+local function flatten(value, path, fields)
+	if type(value) ~= "table" or vim.islist(value) or next(value) == nil then
+		fields[path ~= "" and path or "value"] = value
+		return
+	end
+	for key in pairs(value) do
+		if type(key) == "string" and key:sub(1, 1) == "$" then
+			fields[path ~= "" and path or "value"] = value
+			return
+		end
+	end
+	for key, child in pairs(value) do
+		-- Escape dots/backslashes in literal field names so "address.city"
+		-- cannot overwrite the nested address.city path.
+		local name = tostring(key):gsub("\\", "\\\\"):gsub("%.", "\\.")
+		flatten(child, path == "" and name or path .. "." .. name, fields)
+	end
+end
+
+local function document_cell(value)
+	if value == nil or value == vim.NIL then return "" end
+	if type(value) ~= "table" then return tostring(value) end
+	if value["$oid"] ~= nil then return tostring(value["$oid"]) end
+	if type(value["$date"]) == "string" then return value["$date"] end
+	for _, key in ipairs({ "$numberLong", "$numberDecimal", "$numberDouble", "$numberInt" }) do
+		if value[key] ~= nil then return tostring(value[key]) end
+	end
+	return vim.json.encode(value)
+end
+
+function M.documents_to_csv(documents, delimiter)
+	if #documents == 0 then return nil, "no documents to display as CSV" end
+	local columns, seen, flattened = {}, {}, {}
+	for _, document in ipairs(documents) do
+		local fields = {}
+		flatten(document, "", fields)
+		table.insert(flattened, fields)
+		for key in pairs(fields) do
+			if not seen[key] then
+				seen[key] = true
+				table.insert(columns, key)
+			end
+		end
+	end
+	table.sort(columns, function(a, b)
+		if a == "_id" then return b ~= "_id" end
+		if b == "_id" then return false end
+		return a < b
+	end)
+	local rows = { columns }
+	for _, fields in ipairs(flattened) do
+		local row = {}
+		for _, column in ipairs(columns) do table.insert(row, document_cell(fields[column])) end
+		table.insert(rows, row)
+	end
+	return M.to_csv(rows, delimiter)
 end
 
 return M

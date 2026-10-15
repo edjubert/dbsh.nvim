@@ -8,10 +8,10 @@ local aws = require("dbsh.aws")
 local M = {}
 
 M.name = "mongo"
+M.filetype = "javascript"
+M.extension = "js"
 M.script_delivery = "stdin"
 M.tabular = false
-M.contexts = {}
-M.catalogs = {}
 
 local required_fields = { "host", "database" }
 
@@ -164,14 +164,16 @@ function M.compose(text, mode, connection, runtime)
 		printer = "print(EJSON.stringify(__dbsh_result, null, 0, { relaxed: true }));"
 	end
 	return table.concat({
-		"const __dbsh_conn = Mongo(" .. js_literal(M.uri(connection, password)) .. ");",
+		"(async () => {",
+		"const __dbsh_conn = await Mongo(" .. js_literal(M.uri(connection, password)) .. ");",
 		"db = __dbsh_conn.getDB(" .. js_literal(connection.database) .. ");",
 		"const __dbsh_src = " .. js_literal(text) .. ";",
-		"let __dbsh_result = eval(__dbsh_src);",
+		"let __dbsh_result = await eval(__dbsh_src);",
 		'if (__dbsh_result && typeof __dbsh_result.toArray === "function") {',
-		"\t__dbsh_result = __dbsh_result.toArray();",
+		"\t__dbsh_result = await __dbsh_result.toArray();",
 		"}",
 		printer,
+		"})();",
 		"",
 	}, "\n")
 end
@@ -206,6 +208,13 @@ function M.parse_raw(stdout)
 	end
 	if decoded[1] == nil and next(decoded) ~= nil then return { decoded } end
 	return decoded
+end
+
+M.csv_mode = "raw"
+function M.csv_output(stdout, delimiter)
+	local documents, err = M.parse_raw(stdout)
+	if documents == nil then return nil, err end
+	return require("dbsh.csv").documents_to_csv(documents, delimiter)
 end
 
 local READ_METHODS = {
@@ -257,6 +266,11 @@ function M.classify(text)
 		return { action = "confirm", reason = "javascript" }
 	end
 	local names = called_methods(stripped)
+	-- getCollection is an accessor, not a read itself. Only accept its
+	-- literal-name form followed by the same read/chain rules as db.users.
+	if stripped:match('^db%s*%.%s*getCollection%s*%(%s*""%s*%)%s*%.') then
+		table.remove(names, 1)
+	end
 	if #names == 0 or not READ_METHODS[names[1]] then
 		return { action = "confirm", reason = "javascript" }
 	end
@@ -273,5 +287,189 @@ function M.is_authentication_error(stderr, stdout)
 		or haystack:find("aws credentials", 1, true) ~= nil
 		or haystack:find("mongomissingcredentialserror", 1, true) ~= nil
 end
+
+local function name_filter(query)
+	if query == nil or query == "" then return {} end
+	local escaped = query:gsub(".", function(char)
+		if ("\\^$.*+?()[]{}|"):find(char, 1, true) then return "\\" .. char end
+		return char
+	end)
+	return { name = { ["$regex"] = escaped, ["$options"] = "i" } }
+end
+
+function M.catalog_query(key, request)
+	if key == "databases" then
+		-- Mongo selects the command from the first BSON key. A Lua table's
+		-- JSON key order is unspecified, so encode optional values separately.
+		local command = '{"listDatabases":1,"nameOnly":true,"authorizedDatabases":true'
+		local filter = name_filter(request.query)
+		if next(filter) ~= nil then
+			command = command .. ',"filter":' .. js_literal(filter)
+		end
+		return "db.adminCommand(" .. command .. "})"
+	elseif key == "collections" then
+		local filter = name_filter(request.query)
+		return "db.getCollectionInfos(" .. (next(filter) and js_literal(filter) or "{}") .. ", true, true)"
+	elseif key == "indexes" then
+		local relation = request.relation
+		if type(relation) ~= "table" or type(relation.name) ~= "string" or relation.name == "" then
+			return nil, "Mongo indexes require a collection"
+		end
+		if relation.database ~= request.context.database then
+			return nil, "Mongo collection belongs to another database"
+		end
+		return "db.getCollection(" .. js_literal(relation.name) .. ").getIndexes()"
+	end
+	return nil, "unknown Mongo catalog"
+end
+
+-- Mongo's inventory APIs have no sorted LIMIT/keyset operation. Only metadata
+-- is fetched; filtering and deterministic name pagination belong to this
+-- backend. Database/collection filters also run on the server.
+local function list_catalog(key, paginated)
+	return function(request, callback)
+		local after
+		if request.cursor ~= nil then
+			local ok, cursor = pcall(vim.json.decode, request.cursor)
+			if not ok or type(cursor) ~= "table" or type(cursor.name) ~= "string" then
+				callback(nil, "invalid Mongo catalog cursor")
+				return
+			end
+			after = cursor.name
+		end
+		local query, query_err = M.catalog_query(key, request)
+		if query == nil then callback(nil, query_err); return end
+		local context = require("dbsh.context")
+		local snapshot = context.snapshot(request.context.bufnr)
+		if snapshot.id ~= request.context.id or snapshot.generation ~= request.context.generation then
+			callback(nil, "Mongo catalog context changed")
+			return
+		end
+		require("dbsh.exec").run(query, {
+			context = snapshot, mode = "raw", slot = "introspect",
+		}, function(code, stdout, stderr)
+			if code ~= 0 then
+				-- Never surface a CLI error that might contain a credential URI.
+				local output = (stderr or "") .. (stdout or "")
+				local message = "Mongo catalog request failed"
+				if output:find("not authorized", 1, true) or output:find("Unauthorized", 1, true) then
+					message = "Mongo catalog access denied for the current database"
+				elseif M.is_authentication_error(stderr, stdout) then
+					message = "Mongo catalog authentication failed; refresh your credentials"
+				else
+					local category = output:match("(Mongo[%w]+Error)")
+						or output:match("(TypeError)") or output:match("(SyntaxError)")
+					message = message .. " (" .. (category or "process error")
+						.. ", exit " .. tostring(code) .. ")"
+				end
+				callback(nil, message)
+				return
+			end
+			local rows, parse_err = M.parse_raw(stdout)
+			if rows == nil then callback(nil, parse_err); return end
+			if key == "databases" then
+				rows = rows[1] and rows[1].databases
+				if type(rows) ~= "table" then
+					callback(nil, "invalid Mongo database inventory")
+					return
+				end
+			end
+			local matching = {}
+			local filter = (request.query or ""):lower()
+			for _, row in ipairs(rows) do
+				if type(row) ~= "table" or type(row.name) ~= "string" then
+					callback(nil, "invalid Mongo catalog entry")
+					return
+				end
+				if (after == nil or row.name > after) and row.name:lower():find(filter, 1, true) then
+					table.insert(matching, row)
+				end
+			end
+			table.sort(matching, function(a, b) return a.name < b.name end)
+			local items = {}
+			local limit = paginated == false and #matching or request.limit
+			for index = 1, math.min(#matching, limit) do
+				local row = matching[index]
+				if key == "databases" then
+					table.insert(items, { value = row.name, display = row.name })
+				else
+					local object = {
+						kind = key == "collections" and (row.type or "collection") or "index",
+						database = request.context.database,
+						name = row.name,
+						collection = request.relation and request.relation.name,
+						spec = key == "indexes" and row or nil,
+					}
+					local detail = key == "indexes" and js_literal(row.key or {}) or object.kind
+					table.insert(items, {
+						value = object, display = row.name .. "  [" .. detail .. "]",
+					})
+				end
+			end
+			local next_cursor
+			if #matching > limit then
+				next_cursor = js_literal({ name = matching[limit].name })
+			end
+			callback({ items = items, next_cursor = next_cursor }, nil)
+		end)
+	end
+end
+
+function M.preview_query(item, limit)
+	local object = type(item.value) == "table" and item.value or item
+	if type(limit) ~= "number" or limit < 1 or limit == math.huge or limit ~= math.floor(limit) then
+		limit = 10
+	end
+	-- eval does not receive mongosh's async rewriting: find() returns a
+	-- Promise there, so chaining .limit() would access it before the cursor.
+	-- Supplying the limit in find options bounds the query on the server.
+	return "db.getCollection(" .. js_literal(object.name) .. ").find({}, null, { limit: " .. tostring(limit) .. " })"
+end
+
+local function preview(item, snapshot, options)
+	require("dbsh").query(M.preview_query(item, options.preview_limit), snapshot)
+end
+
+local function show_index(item, snapshot, options)
+	local object = item.value
+	local results = require("dbsh.results")
+	local opts = { split = options.results_split }
+	results.open(snapshot, { split = opts.split, focus = opts.split == "float" })
+	results.render(snapshot, "db.getCollection(" .. js_literal(object.collection) .. ").getIndexes()",
+		js_literal(object.spec), opts)
+end
+
+M.contexts = {
+	{
+		key = "database", command = "MongoDatabases", title = "Mongo databases",
+		-- listDatabases already returns all names. Search the complete
+		-- inventory in Telescope instead of spawning mongosh while typing.
+		list = list_catalog("databases", false),
+		apply = function(snapshot, value)
+			return require("dbsh.context").apply(snapshot, "database", value, "mongo-catalog")
+		end,
+	},
+}
+
+M.catalogs = {
+	{
+		key = "collections", command = "MongoCollections", title = "Mongo collections",
+		list = list_catalog("collections", false), scope = false, on_select = preview,
+		inspect = function(item)
+			return {
+				{ display = "Preview", action = preview },
+				{ display = "Indexes", catalog = "indexes", relation = item.value },
+			}
+		end,
+	},
+	{
+		key = "indexes", command = "MongoIndexes", title = "Mongo indexes",
+		list = list_catalog("indexes"), scope = false, parent = "collections", on_select = show_index,
+	},
+	{
+		key = "preview", command = "MongoPreview", title = "Mongo preview",
+		list = list_catalog("collections", false), scope = false, on_select = preview,
+	},
+}
 
 return M

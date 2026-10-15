@@ -1,7 +1,8 @@
--- Persistent, context-owning SQL scratchpads.
+-- Persistent, context-owning scratchpads in the backend's query language.
 
 local config = require("dbsh.config")
 local context = require("dbsh.context")
+local backends = require("dbsh.backends")
 
 local M = {}
 
@@ -28,9 +29,39 @@ function M.dir()
 	return M._data_dir()
 end
 
-function M.paths(id)
-	local stem = vim.fs.joinpath(M.dir(), id)
-	return stem .. ".sql", stem .. ".json"
+local function stem(id)
+	return vim.fs.joinpath(M.dir(), id)
+end
+
+local function extensions()
+	local known = { sql = true }
+	for _, backend in ipairs(backends.all()) do
+		known[backend.extension or "sql"] = true
+	end
+	local values = vim.tbl_keys(known)
+	table.sort(values)
+	return values
+end
+
+function M.paths(id, backend_name)
+	if backend_name == nil then
+		local item = M.read(id)
+		backend_name = item and item.backend
+	end
+	local backend = backends.get(backend_name)
+	local path = stem(id) .. "." .. (backend and backend.extension or "sql")
+	-- Reuse existing files, including Mongo scratchpads previously stored as
+	-- .sql and scratchpads whose connection/backend was changed later.
+	if vim.fn.filereadable(path) ~= 1 then
+		for _, extension in ipairs(extensions()) do
+			local existing = stem(id) .. "." .. extension
+			if vim.fn.filereadable(existing) == 1 then
+				path = existing
+				break
+			end
+		end
+	end
+	return path, stem(id) .. ".json"
 end
 
 function M.legacy_path(connection_name)
@@ -55,7 +86,7 @@ end
 
 function M.write_metadata(value)
 	local item = metadata(value)
-	local _, path = M.paths(item.id)
+	local path = stem(item.id) .. ".json"
 	local ok, encoded = pcall(vim.json.encode, item)
 	if not ok then
 		return nil, tostring(encoded)
@@ -76,7 +107,7 @@ function M.write_metadata(value)
 end
 
 function M.read(id)
-	local _, path = M.paths(id)
+	local path = stem(id) .. ".json"
 	if vim.fn.filereadable(path) ~= 1 then
 		return nil, metadata_error(id, "metadata file is missing")
 	end
@@ -101,14 +132,14 @@ function M.create(value)
 	local item = metadata(value)
 	item.id = item.id or M._id()
 	item.name = item.name or item.id
-	local sql, json = M.paths(item.id)
-	if vim.fn.filereadable(sql) == 1 or vim.fn.filereadable(json) == 1 then
+	local path, json = M.paths(item.id, item.backend)
+	if vim.fn.filereadable(path) == 1 or vim.fn.filereadable(json) == 1 then
 		return nil, "scratchpad already exists"
 	end
 
 	vim.fn.mkdir(M.dir(), "p")
-	if vim.fn.writefile({}, sql) ~= 0 then
-		return nil, "could not create scratchpad SQL file"
+	if vim.fn.writefile({}, path) ~= 0 then
+		return nil, "could not create scratchpad query file"
 	end
 	local saved, err = M.write_metadata(item)
 	if saved == nil then
@@ -119,7 +150,11 @@ end
 
 function M.list()
 	local ids = {}
-	for _, pattern in ipairs({ "*.sql", "*.json" }) do
+	local patterns = { "*.json" }
+	for _, extension in ipairs(extensions()) do
+		table.insert(patterns, "*." .. extension)
+	end
+	for _, pattern in ipairs(patterns) do
 		for _, path in ipairs(vim.fn.globpath(M.dir(), pattern, false, true)) do
 			local id = vim.fs.basename(path):gsub("%.[^.]+$", "")
 			ids[id] = true
@@ -189,6 +224,14 @@ function M.migrate_legacy(connection_name)
 	return item
 end
 
+local function set_filetype(bufnr, backend_name)
+	local backend = backends.get(backend_name)
+	local filetype = backend and backend.filetype or "sql"
+	if vim.api.nvim_buf_is_valid(bufnr) and vim.bo[bufnr].filetype ~= filetype then
+		vim.bo[bufnr].filetype = filetype
+	end
+end
+
 local function persist_from_context(item, public)
 	local saved, err = M.write_metadata({
 		id = item.id,
@@ -204,6 +247,7 @@ local function persist_from_context(item, public)
 			vim.log.levels.ERROR
 		)
 	end
+	set_filetype(public.bufnr, public.backend)
 end
 
 function M.open(id)
@@ -213,10 +257,9 @@ function M.open(id)
 		return nil, err
 	end
 
-	local sql = M.paths(id)
+	local path = M.paths(id, item.backend)
 	vim.fn.mkdir(M.dir(), "p")
-	vim.cmd("edit " .. vim.fn.fnameescape(sql))
-	vim.bo.filetype = "sql"
+	vim.cmd("edit " .. vim.fn.fnameescape(path))
 
 	local connection, connection_err = config.connection(item.connection_name)
 	if connection == nil and item.connection_name ~= nil then
@@ -233,7 +276,8 @@ function M.open(id)
 		project_root = item.project_root,
 		on_change = function(public) persist_from_context(item, public) end,
 	})
-	return sql
+	set_filetype(vim.api.nvim_get_current_buf(), connection and (connection.type or "postgres") or item.backend)
+	return path
 end
 
 return M

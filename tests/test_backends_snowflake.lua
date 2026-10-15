@@ -60,6 +60,14 @@ T["uses JSON_EXT only for raw output and password only in the environment"] = fu
 	})
 end
 
+T["uses native CSV with headers for CSVView instead of JSON_EXT"] = function()
+	local argv = snowflake.argv(connection, "/tmp/query.sql", snowflake.csv_mode)
+	eq(vim.tbl_contains(argv, "CSV"), true)
+	eq(vim.tbl_contains(argv, "JSON_EXT"), false)
+	eq(snowflake.csv_delimiter, ",")
+	eq(vim.tbl_contains(argv, "--silent"), true)
+end
+
 T["parses JSON_EXT while preserving result column order"] = function()
 	local fixture = table.concat(vim.fn.readfile("tests/fixtures/snowflake_json_ext.json"), "\n")
 	local rows, err = snowflake.parse_raw(fixture)

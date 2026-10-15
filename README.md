@@ -214,7 +214,7 @@ require("dbsh").setup({
 | `default` | `nil` | Connection selected at startup. Falls back to any declared one. |
 | `connect_timeout` | `5` | `PGCONNECT_TIMEOUT`, in seconds. |
 | `query_timeout` | `30000` | Kills a runaway query, in milliseconds. |
-| `preview_limit` | `10` | `LIMIT` used when previewing a table from the picker. |
+| `preview_limit` | `10` | Maximum rows/documents when previewing a table or collection. |
 | `catalog_page_size` | `200` | Number of catalog objects fetched per page. |
 | `credentials.cache_ttl_ms` | `900000` | In-memory credential cache lifetime for password commands and AWS profiles, capped by AWS credential expiration. |
 | `csv_delimiter` | `","` | Column separator, for both CSV export and CSV yank. |
@@ -318,8 +318,13 @@ The `proxy` field is optional. When it is configured, dbsh does not open the
 tunnel; run `ssh -D 1080 -N <bastion>` yourself. The
 password is injected in memory into a script delivered on standard input, never
 argv or disk. Results are documents, not a table: `:DbYankCell` and
-`:DbYankCSV` refuse. Catalog browsing, table preview, and CSV export are not
-implemented for MongoDB yet.
+`:DbYankCSV` refuse. MongoDB provides database selection, collection/view
+browsing, index inspection and bounded document previews. `:DbCSVView` can
+display documents in a CSV buffer; `:DbExportCSV` file export is not implemented
+for MongoDB yet.
+Mongo scratchpads and result buffers use the Neovim `javascript` filetype.
+New Mongo scratchpads are saved as `.js`; existing `.sql` scratchpads are
+reopened with JavaScript highlighting and keep their contents.
 
 ### AWS IAM authentication
 
@@ -455,6 +460,7 @@ no patched PgLS binary is required.
 | `:DbCloseDefinitions` | close visible definition windows for the active context |
 | `:DbToggleResults` | toggle the result window closed or open, keeping its content |
 | `:DbExportCSV` | export a query result to a CSV file — accepts a range |
+| `:DbCSVView` | run a query into a separate CSVView buffer — MongoDB, PostgreSQL and Snowflake; accepts a range |
 | `:DbCancel` | cancel the running query |
 | `:DbInfo` | show the current connection and database |
 
@@ -472,13 +478,43 @@ context. PostgreSQL provides:
 | `:DbColumns`, `:DbIndexes`, `:DbConstraints`, `:DbSequences` | browse structural objects |
 | `:DbFunctions`, `:DbTypes`, `:DbPolicies`, `:DbTriggers`, `:DbExtensions` | browse remaining PostgreSQL object kinds |
 
-Catalog searches are literal server-side filters, not arbitrary SQL. They use
-deterministic keyset pagination; choose **Load more** to fetch the next page.
+All dbsh Telescope pickers filter their loaded entries locally while you type,
+without running a query or reopening the picker. Paginated catalogs use
+deterministic keyset pagination; choose **Load more** explicitly to fetch the
+next page. Explicit `query` filters passed to the Lua catalog API remain
+literal server-side filters, not arbitrary SQL.
 
 Snowflake provides `:DbRoles`, `:DbWarehouses`, `:DbDatabases`, `:DbSchemas`,
 `:DbRelations`, `:DbFunctions`, `:DbSequences`, `:DbStages`,
 `:DbFileFormats`, `:DbStreams`, `:DbTasks` and `:DbPipes`. Context commands
 and object catalogs share these names where selecting the value is meaningful.
+
+MongoDB uses its own command prefix:
+
+| Command | Description |
+|---|---|
+| `:DbMongoDatabases` | list authorized databases and select the active buffer's database |
+| `:DbMongoCollections` | browse collections/views; Enter previews up to `preview_limit` documents |
+| `:DbMongoIndexes` | choose a collection, browse its indexes, and inspect a full index specification |
+| `:DbMongoPreview` | choose a collection/view for a bounded document preview |
+
+In the collection picker, `<C-i>` opens actions for preview and index browsing.
+These commands work with password and AWS authentication and use the active
+database; MongoDB does not have a schema selection step. Generic SQL commands
+such as `:DbSchemas` and `:DbIndexes` remain specific to their SQL backends.
+
+`:DbMongoDatabases` and the collection selectors (`:DbMongoCollections`,
+`:DbMongoPreview`, and the collection step of `:DbMongoIndexes`) fetch their
+complete name inventories once per opening. Telescope searches those names
+locally while you type, without starting another `mongosh` process; the names
+are not limited by `catalog_page_size`.
+
+Mongo inventory APIs return metadata lists without a sorted limit operation.
+For indexes, the backend filters and sorts the inventory and returns pages
+with a name-based cursor; **Load more** fetches the next page. Explicit database
+and collection query filters use literal case-insensitive server filters.
+Catalog browsing reads metadata only; selecting a collection for preview reads
+documents.
 
 ### Compatibility note
 
@@ -495,13 +531,14 @@ The plugin defines no keymaps. These are the functions worth binding:
 
 | Function | Description |
 |---|---|
-| `query(sql)` | run an arbitrary string |
+| `query(text, snapshot?)` | run an arbitrary string against the active or captured context |
 | `query_paragraph()` | run the block around the cursor, delimited by blank lines |
 | `query_current_line()` | run the line under the cursor |
 | `query_selection()` | run the visual selection, in any visual mode |
 | `yank_cell()` | copy the result cell under the cursor |
 | `yank_csv()` | copy the selected result cells as CSV |
 | `export_csv(opts)` | the function behind `:DbExportCSV` |
+| `csv_view(opts)` | the function behind `:DbCSVView` |
 | `last_query()` | the last query handed to `query()`, or `nil` |
 
 ## Keymaps
@@ -709,9 +746,11 @@ Framing: include the statusline; the path is the point of the shot.
 -->
 ![Scratchpad](docs/media/scratchpad.png)
 
-`:DbTemp` opens a picker of named scratchpads. Each scratchpad is a real `.sql`
-file with persistent metadata: backend, optional connection, effective context
-levels, and an optional project root. Your SQL LSP, formatter, and persistent
+`:DbTemp` opens a picker of named scratchpads. Each scratchpad is a real query
+file (`.sql` for PostgreSQL/Snowflake, `.js` for MongoDB) with persistent metadata:
+backend, optional connection, effective context levels, and an optional project
+root. Syntax highlighting follows the backend, including after a connection
+change; existing files retain their path. Your language tools and persistent
 undo work normally, and scratchpads survive restarts.
 
 Scratchpads do not share an in-memory global context. Opening two of them keeps
@@ -778,6 +817,39 @@ variable_patterns = { ":([%w_]+)" },
 Be aware it also matches things you did not mean: `a::text` yields a variable
 named `text`, and `'12:30'` yields `30`. Naming each variable explicitly, as in
 `":(raw_data)"`, avoids this entirely and is the recommended default.
+
+## CSVView
+
+Install [hat0uma/csvview.nvim](https://github.com/hat0uma/csvview.nvim), then run
+`:DbCSVView`:
+
+| Where | Query used |
+|---|---|
+| Result buffer | Re-run the displayed query using its captured connection |
+| Query buffer | Run the paragraph under the cursor |
+| Selected range | Run only the selected lines, e.g. `:'<,'>DbCSVView` |
+| CSVView buffer | Re-run that view's source query |
+
+This **executes the query again**; it does not parse the displayed table or
+reuse previously fetched documents. Normal safety confirmation and query-variable
+resolution still apply. The original result stays available. The separate,
+read-only CSV buffer contains a header and data only, with CSVView enabled
+automatically, and follows `results_split`. Close it with `:close` (or `q` /
+`<Esc>` in a float).
+
+PostgreSQL uses `psql --csv` (psql 12+) and Snowflake uses Snow CLI's native CSV
+output. SQL is executed as written, including its semicolons and comments.
+Select a single result set for a table with one header.
+MongoDB converts EJSON documents into one row per document, using the union of
+their fields as columns. Nested objects become paths such as `address.city`;
+arrays stay JSON inside one cell. Literal dots/backslashes in field names are
+escaped to avoid ambiguous column names. ObjectIds, ISO dates and numeric EJSON
+wrappers are shown as their values. Missing fields and nulls become empty cells.
+An empty Mongo result has no discoverable columns and is reported as such.
+
+PostgreSQL and MongoDB use `csv_delimiter`; Snowflake's native CSV uses a comma.
+CSVView gets an explicit delimiter and header, and personal comment prefixes
+are disabled for this buffer so values starting with `#` or `//` remain data.
 
 ## CSV export
 
@@ -916,6 +988,7 @@ The modules are small and single-purpose, which is what makes them testable:
 | `scratch.lua` | named scratchpads and their metadata |
 | `safety.lua` | pure conservative SQL confirmation classifier |
 | `csv.lua` | table parsing and CSV serialization, pure functions |
+| `csvview.lua` | query-backed CSV buffers and optional CSVView integration |
 | `export.lua` | destination paths and the `COPY` statement |
 | `telescope/pickers.lua` | connection, scratchpad, catalog, and definition pickers |
 | `init.lua` | public API and user commands |

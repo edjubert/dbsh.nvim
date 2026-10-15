@@ -35,6 +35,10 @@ local T = MiniTest.new_set({
 						password = "never-persisted",
 					},
 					staging = { host = "db.example.com", port = 5432, database = "app", username = "readonly" },
+					atlas = {
+						type = "mongo", srv = true, host = "cluster.example.test", database = "analytics",
+						username = "analyst", password_command = { "password-command" },
+					},
 				},
 				default = "local_db",
 			})
@@ -56,6 +60,62 @@ T["stores paired SQL and metadata files under the scratchpad catalog"] = functio
 	local sql, json = scratch.paths("pad-1")
 	eq(sql, vim.fs.joinpath(root, "scratchpads", "pad-1.sql"))
 	eq(json, vim.fs.joinpath(root, "scratchpads", "pad-1.json"))
+end
+
+T["creates and reopens Mongo scratchpads as JavaScript files"] = function()
+	local item = assert(scratch.create(metadata("mongo-pad", {
+		backend = "mongo", connection_name = "atlas", levels = { database = "analytics" },
+	})))
+	local path = scratch.paths(item.id)
+	eq(path, vim.fs.joinpath(root, "scratchpads", "mongo-pad.js"))
+	vim.fn.writefile({ 'db.getCollection("branches").find({});' }, path)
+	eq(scratch.list()[1].id, item.id)
+	eq(scratch.open(item.id), path)
+	eq(vim.bo.filetype, "javascript")
+	eq(vim.api.nvim_buf_get_lines(0, 0, -1, true), { 'db.getCollection("branches").find({});' })
+	eq(context.snapshot(0).connection.database, "analytics")
+end
+
+T["reopens existing Mongo SQL files as JavaScript without replacing their contents"] = function()
+	local id = "old-mongo"
+	local path = vim.fs.joinpath(root, "scratchpads", id .. ".sql")
+	assert(scratch.write_metadata(metadata(id, {
+		backend = "mongo", connection_name = "atlas", levels = { database = "analytics" },
+	})))
+	vim.fn.writefile({ 'db.getCollection("branches").find({});' }, path)
+	eq(scratch.open(id), path)
+	eq(vim.bo.filetype, "javascript")
+	eq(vim.fn.readfile(path), { 'db.getCollection("branches").find({});' })
+	eq(vim.fn.filereadable(vim.fs.joinpath(root, "scratchpads", id .. ".js")), 0)
+end
+
+T["updates scratchpad language on connection changes and keeps unsaved contents"] = function()
+	assert(scratch.create(metadata("switching")))
+	local path = scratch.open("switching")
+	local buf = vim.api.nvim_get_current_buf()
+	vim.api.nvim_buf_set_lines(buf, 0, -1, true, { "// unsaved scratchpad" })
+	assert(context.bind(buf, "atlas"))
+	eq(vim.bo[buf].filetype, "javascript")
+	eq(scratch.paths("switching"), path)
+	eq(scratch.read("switching").backend, "mongo")
+	assert(context.bind(buf, "local_db"))
+	eq(vim.bo[buf].filetype, "sql")
+	eq(vim.api.nvim_buf_get_lines(buf, 0, -1, true), { "// unsaved scratchpad" })
+	eq(vim.bo[buf].modified, true)
+	vim.api.nvim_buf_delete(buf, { force = true })
+end
+
+T["keeps a JavaScript scratchpad file when its connection changes to PostgreSQL"] = function()
+	local item = assert(scratch.create(metadata("changing-mongo", {
+		backend = "mongo", connection_name = "atlas", levels = { database = "analytics" },
+	})))
+	local path = scratch.open(item.id)
+	assert(context.bind(0, "local_db"))
+	eq(vim.bo.filetype, "sql")
+	eq(scratch.paths(item.id), path)
+	eq(scratch.open(item.id), path)
+	eq(vim.bo.filetype, "sql")
+	eq(vim.fn.fnamemodify(path, ":e"), "js")
 end
 
 T["creates public JSON metadata without copying profile credentials"] = function()
