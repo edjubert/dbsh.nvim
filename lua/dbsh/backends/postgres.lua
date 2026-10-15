@@ -25,10 +25,12 @@ local RAW_PREAMBLE = table.concat({
 	"\\set ON_ERROR_STOP 1",
 }, "\n")
 
--- mode is "pretty" (decorated, meant for the user) or "raw" (parsable).
+-- mode is "pretty" (decorated), "raw" (tuples), or "csv" (native CSV).
 function M.preamble(mode)
 	if mode == "raw" then
 		return RAW_PREAMBLE
+	elseif mode == "csv" then
+		return RAW_PREAMBLE .. "\n\\pset footer off"
 	end
 	return PRETTY_PREAMBLE
 end
@@ -45,6 +47,8 @@ function M.argv(conn, script_path, mode)
 	}
 	if mode == "raw" then
 		vim.list_extend(argv, { "-A", "-t", "-F", "\t" })
+	elseif mode == "csv" then
+		table.insert(argv, "--csv")
 	end
 	vim.list_extend(argv, { "-f", script_path })
 	return argv
@@ -128,6 +132,13 @@ function M.export_query(query, delimiter)
 		inner,
 		delimiter
 	)
+end
+
+M.csv_mode = "csv"
+function M.csv_query(query, delimiter)
+	-- Let psql execute the original statements. COPY cannot contain a
+	-- statement terminator, including one followed by comments or more SQL.
+	return "\\pset csv_fieldsep '" .. escape_value(delimiter) .. "'\n" .. query
 end
 
 -- Double inner quotes so mixed-case names and reserved words survive.

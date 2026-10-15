@@ -1,6 +1,8 @@
 -- Result buffer management scoped by dbsh context session.
 
 local float = require("dbsh.float")
+local context = require("dbsh.context")
+local backends = require("dbsh.backends")
 
 local M = {}
 
@@ -112,8 +114,12 @@ function M.open(snapshot, opts)
 		vim.bo[buf].buftype = "nofile"
 		vim.bo[buf].bufhidden = "hide"
 		vim.bo[buf].swapfile = false
-		vim.bo[buf].filetype = "sql"
 		state.buffers[snapshot.id] = buf
+	end
+	local backend = context.backend(snapshot) or backends.get(snapshot.backend_name)
+	local filetype = backend and backend.filetype or "sql"
+	if vim.bo[buf].filetype ~= filetype then
+		vim.bo[buf].filetype = filetype
 	end
 
 	local previous_win = vim.api.nvim_get_current_win()
@@ -193,6 +199,7 @@ end
 
 function M.running(snapshot, query, opts)
 	local buf = M.open(snapshot, initial_focus(opts))
+	vim.b[buf].dbsh_result_query = query
 	local lines = { "# Running..." }
 	vim.list_extend(lines, split_lines(query))
 	table.insert(lines, "")
@@ -203,6 +210,7 @@ end
 
 function M.render(snapshot, query, output, opts)
 	local buf = M.open(snapshot, without_focus(opts))
+	vim.b[buf].dbsh_result_query = query
 	local lines = split_lines(query)
 	table.insert(lines, "")
 	vim.list_extend(lines, split_lines(output))

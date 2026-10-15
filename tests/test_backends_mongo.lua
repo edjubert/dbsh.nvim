@@ -168,8 +168,10 @@ end
 T["declares the Mongo runtime contract"] = function()
 	eq(mongo.script_delivery, "stdin")
 	eq(mongo.tabular, false)
-	eq(mongo.contexts, {})
-	eq(mongo.catalogs, {})
+	eq(vim.tbl_map(function(definition) return definition.command end, mongo.contexts), { "MongoDatabases" })
+	eq(vim.tbl_map(function(definition) return definition.command end, mongo.catalogs), {
+		"MongoCollections", "MongoIndexes", "MongoPreview",
+	})
 	eq(mongo.is_authentication_error("Authentication failed", ""), true)
 	eq(mongo.is_authentication_error("", "MongoMissingCredentialsError: ..."), true)
 end
@@ -183,6 +185,31 @@ T["composes pretty and raw mongosh scripts"] = function()
 	local raw = mongo.compose("db.users.find()", "raw", profile(), { password = "s3cr3t" })
 	expect_match(raw, "EJSON%.stringify")
 	expect_match(raw, "toArray")
+end
+
+T["executes asynchronous collection previews with a bounded result"] = function()
+	if vim.fn.executable("node") == 0 then MiniTest.skip("Node.js is required to execute the generated JavaScript") end
+	local name = 'branches."quoted"'
+	local fixture = table.concat({
+		"let db;",
+		"const Mongo = async () => ({ getDB: () => ({ getCollection: name => {",
+		"  if (name !== " .. vim.json.encode(name) .. ') throw new Error("wrong collection");',
+		"  return { find: async (filter, projection, options = {}) => ({",
+		"    toArray: async () => Array.from({ length: 25 }, (_, i) => ({ id: i })).slice(0, options.limit)",
+		"  }) };",
+		"} }) });",
+		'const print = value => process.stdout.write(String(value) + "\\n");',
+		"const printjson = value => print(JSON.stringify(value));",
+		"const EJSON = { stringify: JSON.stringify };",
+	}, "\n")
+	for _, mode in ipairs({ "pretty", "raw" }) do
+		local script = mongo.compose(mongo.preview_query({ name = name }, 3), mode, profile(), {})
+		local result = vim.system({ "node" }, {
+			text = true, stdin = fixture .. "\n" .. script, timeout = 5000,
+		}):wait()
+		eq(result.code, 0)
+		eq(vim.json.decode(result.stdout), { { id = 0 }, { id = 1 }, { id = 2 } })
+	end
 end
 
 T["composes AWS scripts without password in URI"] = function()
@@ -210,6 +237,11 @@ T["classifies Mongo reads conservatively"] = function()
 	eq(mongo.classify("db.users.deleteOne({})").action, "confirm")
 	eq(mongo.classify("db.users.find().forEach(d => db.users.deleteOne(d))").action, "confirm")
 	eq(mongo.classify("db.users.find(); db.users.drop()").reason, "multiple_statements")
+	eq(mongo.classify('db.getCollection("a.b").find({}).limit(10)').action, "run")
+	eq(mongo.classify('db.getCollection("a.b").getIndexes()').action, "run")
+	eq(mongo.classify('db.getCollection("a.b").deleteMany({})').action, "confirm")
+	eq(mongo.classify('other.getCollection("a.b").find({})').action, "confirm")
+	eq(mongo.classify('db.getCollection(chooseName()).find({})').action, "confirm")
 end
 
 return T

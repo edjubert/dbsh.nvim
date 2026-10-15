@@ -406,6 +406,35 @@ T["uses an all-schema scope without persisting it in context"] = function()
 	eq(context.current(0).levels.schema, nil)
 end
 
+T["loads a catalog after selecting a schema with the updated context"] = function()
+	connect()
+	local catalog = require("dbsh.catalog")
+	local original_request, original_select, original_telescope = catalog.request, vim.ui.select, pickers._telescope
+	local loaded, selections = false, 0
+	pickers._telescope = function() return nil end
+	catalog.request = function(snapshot, definition, options, callback)
+		if definition.key == "schema" then
+			callback({ items = { { value = "public" } } })
+		else
+			eq(snapshot.connection.schema, "public")
+			eq(options.scope.schema, "public")
+			eq(context.is_current(snapshot), true)
+			loaded = true
+			callback({ items = {} })
+		end
+	end
+	vim.ui.select = function(items, _, callback)
+		selections = selections + 1
+		callback(selections <= 2 and items[1] or nil)
+	end
+
+	pickers.catalog("relations")
+
+	catalog.request, vim.ui.select, pickers._telescope = original_request, original_select, original_telescope
+	eq(loaded, true)
+	eq(selections, 3)
+end
+
 T["does not ask for a schema scope for a backend-neutral account catalog"] = function()
 	config.setup({
 		connections = {
@@ -534,8 +563,23 @@ T["maps relation inspection in both Telescope modes"] = function()
 	eq(captured.last_results[7].title, "Definition")
 end
 
-T["debounces a typed catalog filter before issuing the replacement request"] = function()
-	connect()
+T["keeps Telescope filtering local for catalogs and contexts of every backend"] = function()
+	config.setup({
+		connections = {
+			pg = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
+			atlas = {
+				type = "mongo", srv = true, host = "cluster.example.test", database = "analytics",
+				username = "analyst", password_command = { "password-command" },
+			},
+			snow = {
+				type = "snowflake", host = "account.example.test", port = 443, username = "analyst",
+				authenticator = "https://sso.example.test", role = "ANALYST", warehouse = "COMPUTE",
+				database = "ANALYTICS", password_command = { "password-command" },
+			},
+		},
+		default = "pg",
+	})
+	context.setup()
 	local catalog = require("dbsh.catalog")
 	local original_request, original_telescope = catalog.request, pickers._telescope
 	local requests, picker_options = {}, {}
@@ -561,13 +605,23 @@ T["debounces a typed catalog filter before issuing the replacement request"] = f
 	end
 	pickers._telescope = function() return fake end
 
-	pickers.catalog("relations", { scope = { schema = nil, all_schemas = true } })
-	picker_options[1].on_input_filter_cb("orders")
-	vim.wait(500, function() return #requests == 2 end)
+	for _, profile in ipairs({
+		{ name = "atlas", catalog = "collections", context = "database" },
+		{ name = "snow", catalog = "relations", context = "role" },
+		{ name = "pg", catalog = "relations", context = "database" },
+	}) do
+		assert(context.bind(0, profile.name))
+		pickers.catalog(profile.catalog, { scope = { schema = nil, all_schemas = true } })
+		pickers.context(profile.context)
+	end
 
 	pickers._telescope = original_telescope
 	catalog.request = original_request
-	eq(requests, { "", "orders" })
+	eq(#requests, 6)
+	eq(#picker_options, 6)
+	for _, options in ipairs(picker_options) do
+		eq(options.on_input_filter_cb, nil)
+	end
 end
 
 T["hands a selected object to its catalog action"] = function()

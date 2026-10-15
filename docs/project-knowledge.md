@@ -16,8 +16,27 @@ dans `lua/dbsh/backends/init.lua`. Il déclare notamment `argv`, `env`, `preambl
 actif ; `catalogs` représente les objets à parcourir. Un catalogue expose
 `key`, `command`, `title`, `list(request, callback)` et ses actions. Son
 `request` contient un contexte **public**, une portée, un filtre littéral, un
-curseur opaque et une limite. La pagination reste côté backend : aucune couche
-partagée ne filtre ni ne récupère toutes les pages en mémoire.
+curseur opaque et une limite. La construction des pages et les filtres de
+requête restent côté backend ; l’UI filtre localement les entrées déjà
+chargées et ne récupère pas toutes les pages en mémoire.
+
+MongoDB expose `DbMongoDatabases` (contexte), `DbMongoCollections`,
+`DbMongoIndexes` et `DbMongoPreview` (catalogues). Les API d’inventaire Mongo
+n’exposent pas de tri avec limite : le backend filtre, trie et pagine les
+métadonnées des index par nom. Le contexte des bases et les catalogues
+collections/preview renvoient tous les noms en une seule requête, sans limite
+de page. Les filtres littéraux explicites des bases et collections sont aussi
+transmis au serveur. Les index déclarent `parent = "collections"` : le picker
+sélectionne d’abord une collection sans déclencher son aperçu. Les actions
+`on_select`/`action` reçoivent les options en troisième argument et conservent
+le snapshot du buffer source ; `query(text, snapshot)` accepte ce contexte.
+Le script Mongo utilise une fonction `async` et attend le résultat d’`eval`,
+puis la matérialisation du curseur avec `toArray`. `eval` ne bénéficie pas de
+la réécriture asynchrone de mongosh : l’aperçu passe donc la limite aux options
+de `find({}, null, { limit: n })`, sans chaîner `limit()` sur sa promesse.
+Une commande Mongo choisit son opération à partir de sa première clé BSON :
+`listDatabases` est donc émis explicitement avant les options, sans dépendre de
+l’ordre des clés d’une table Lua lors de l’encodage JSON.
 
 Un backend ne requiert jamais `config`, `definitions` ou l’état global. Les
 valeurs nécessaires lui sont passées en argument. Les accès à `exec` depuis un
@@ -53,6 +72,37 @@ distinctes du registre ne peuvent donc pas se disputer un nom et déclencher
 `E95`. `find_buf` récupère aussi un buffer par sa variable locale
 `dbsh_context_id` : un rechargement du plugin vide l’état du module, pas les
 buffers.
+
+Scratchpads et résultats utilisent `backend.filetype` : `sql` pour
+PostgreSQL/Snowflake, `javascript` pour MongoDB. Les nouveaux scratchpads suivent
+`backend.extension` (`.sql` ou `.js`). Les fichiers existants sont réutilisés
+sans renommage ; le filetype suit aussi les changements de connexion. Les
+résultats choisissent leur filetype depuis le snapshot source, puis le mettent
+à jour même quand leur buffer existe déjà.
+
+`DbCSVView` / `csv_view(opts)` réexécute une requête dans un buffer CSV séparé,
+avec `csvview.nvim` facultatif mais requis pour cette commande. Depuis un
+résultat, la requête est `b:dbsh_result_query`, pas le texte décoré du buffer ni
+la dernière requête d’un autre affichage. La confirmation de sécurité et
+`resolve.preamble` passent par le même chemin que les requêtes ordinaires.
+Les contextes devenus obsolètes sont refusés avant d’ouvrir une vue.
+
+Les backends exposent `csv_mode`, éventuellement `csv_query(text, delimiter)`,
+`csv_output(stdout, delimiter)` et `csv_delimiter`. PostgreSQL utilise
+`psql --csv`, sans pied de tableau, et fixe `csv_fieldsep` avant le SQL original :
+aucun wrapper `COPY`, donc les points-virgules/commentaires sont préservés.
+Snowflake demande `--format CSV` (virgule native) ;
+Mongo convertit les documents EJSON raw avec `csv.documents_to_csv`.
+Les objets Mongo imbriqués deviennent des chemins ; tableaux et wrappers EJSON
+restent dans une seule cellule, les colonnes sont l’union des champs.
+
+Le buffer CSV conserve sa requête et son snapshot dans `b:dbsh_csv_source`,
+sans utiliser `dbsh_context_id` qui appartient au registre des résultats.
+Il est en lecture seule, `bufhidden=wipe`, respecte `results_split` et ne
+focalise pas au retour asynchrone. `DbCancel` utilise son snapshot, et les
+mappings de lecture des requêtes refusent ce buffer. La configuration parser
+de CSVView fixe le séparateur, les guillemets, la première ligne d’en-tête et
+désactive les commentaires propres à la configuration personnelle.
 
 Le focus de la fenêtre de résultat est dérivé de `results_split`, il n’a pas
 d’option à lui : un split reste à côté du buffer SQL et ne prend jamais le
@@ -124,6 +174,10 @@ variables, puis exécute avec le snapshot déjà capturé.
 backend du buffer actif. `telescope/pickers.lua` est générique : connexion,
 scratchpad, contexte, catalogue et définitions. Telescope est optionnel ; les
 chemins concernés dégradent vers une UI Neovim ou une erreur explicite.
+Tous les sélecteurs Telescope filtrent leurs entrées chargées localement :
+aucun callback de saisie ne lance de requête ni ne rouvre le picker. Les
+catalogues paginés gardent l’action explicite « Load more » ; les filtres
+`query` fournis à l’API Lua restent transmis au backend.
 
 `DbTables` est le contrat de compatibilité PostgreSQL ; `DbRelations` est le
 parcours de relations canonique. Ne pas réintroduire `backend.levels` ni une

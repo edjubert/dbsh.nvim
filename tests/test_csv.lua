@@ -84,4 +84,16 @@ T["honours a custom delimiter"] = function()
 	eq(csv.to_csv({ { "id", "name" } }, ";"), "id;name")
 end
 
+T["escapes CR and LF values as CSV fields"] = function()
+	eq(csv.to_csv({ { "a\rb", "c\nd", 'say "hi"', "x;y" } }, ";"),
+		'"a\rb";"c\nd";"say ""hi""";"x;y"')
+end
+
+T["flattens heterogeneous documents without colliding literal dotted field names"] = function()
+	eq(csv.documents_to_csv({
+		{ ["address.city"] = "literal", address = { city = "nested" }, created = { ["$date"] = "2026-10-14" } },
+		{ amount = { ["$numberDecimal"] = "123.456789" } },
+	}, ";"), "address.city;address\\.city;amount;created\nnested;literal;;2026-10-14\n;;123.456789;")
+end
+
 return T

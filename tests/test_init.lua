@@ -74,7 +74,7 @@ end
 
 T["declares every backend-agnostic command"] = function()
 	for _, name in ipairs({
-		"DbConnections", "DbTemp", "DbCancel", "DbToggleResults", "DbInfo",
+		"DbConnections", "DbTemp", "DbCancel", "DbToggleResults", "DbCSVView", "DbInfo",
 		"DbObjects", "DbGlobalConnection", "DbForgetConnection",
 		"DbDefinitions", "DbToggleDefinition", "DbRefreshDefinition", "DbCloseDefinitions",
 	}) do
@@ -127,9 +127,46 @@ T["opens the scratchpad catalog from DbTemp"] = function()
 end
 
 T["declares context and catalog commands from the backend union"] = function()
-	for _, name in ipairs({ "DbDatabases", "DbSchemas", "DbRelations", "DbTables" }) do
+	for _, name in ipairs({
+		"DbDatabases", "DbSchemas", "DbRelations", "DbTables",
+		"DbMongoDatabases", "DbMongoCollections", "DbMongoIndexes", "DbMongoPreview",
+	}) do
 		eq(vim.fn.exists(":" .. name), 2)
 	end
+end
+
+T["dispatches Mongo-prefixed commands only for Mongo profiles"] = function()
+	dbsh.setup({
+		connections = {
+			pg = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
+			atlas = {
+				type = "mongo", srv = true, host = "cluster.example.test", database = "analytics",
+				username = "analyst", password_command = { "password-command" },
+			},
+		},
+		default = "pg",
+	})
+	local pickers = require("dbsh.telescope.pickers")
+	local old_context, old_catalog, old_notify = pickers.context, pickers.catalog, vim.notify
+	local called, messages = {}, {}
+	pickers.context = function(key) table.insert(called, "context:" .. key) end
+	pickers.catalog = function(key) table.insert(called, "catalog:" .. key) end
+	vim.notify = function(message) table.insert(messages, message) end
+
+	vim.cmd("DbMongoDatabases")
+	vim.cmd("DbMongoIndexes")
+	eq(#called, 0)
+	assert(context.bind(0, "atlas"))
+	for _, name in ipairs({ "DbMongoDatabases", "DbMongoCollections", "DbMongoIndexes", "DbMongoPreview" }) do
+		vim.cmd(name)
+	end
+	vim.cmd("DbDatabases")
+	vim.cmd("DbIndexes")
+
+	pickers.context, pickers.catalog, vim.notify = old_context, old_catalog, old_notify
+	eq(called, { "context:database", "catalog:collections", "catalog:indexes", "catalog:preview" })
+	eq(#messages, 4)
+	for _, message in ipairs(messages) do expect_match(message, "not available") end
 end
 
 T["keeps catalog commands declared and dispatches by active backend"] = function()
