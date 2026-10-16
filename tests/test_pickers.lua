@@ -680,6 +680,7 @@ T["opens the selected scratchpad from the catalog picker"] = function()
 	local fake = {
 		pickers = {
 			new = function(_, opts)
+				captured.previewer = opts.previewer
 				return {
 					find = function()
 						assert(opts.attach_mappings(1, function(mode, key, handler)
@@ -697,6 +698,7 @@ T["opens the selected scratchpad from the catalog picker"] = function()
 			end,
 		},
 		conf = { generic_sorter = function(_) return {} end },
+		previewers = { new_buffer_previewer = function(opts) return opts end },
 		actions = { close = function() end },
 		state = {
 			get_selected_entry = function()
@@ -729,6 +731,7 @@ T["opens the selected scratchpad from the catalog picker"] = function()
 	scratch.list = original_list
 	pickers._telescope = original_telescope
 	eq(captured.results[1].kind, "new")
+	eq(type(captured.previewer.define_preview), "function")
 	eq(opened, "monthly")
 end
 

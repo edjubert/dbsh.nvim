@@ -179,6 +179,14 @@ aucun callback de saisie ne lance de requête ni ne rouvre le picker. Les
 catalogues paginés gardent l’action explicite « Load more » ; les filtres
 `query` fournis à l’API Lua restent transmis au backend.
 
+`DbTemp` fournit un `new_buffer_previewer` via `telescope/scratch_preview.lua`.
+Il copie le contenu d’un buffer déjà chargé (modifications non enregistrées
+comprises), sinon délègue la lecture asynchrone au `buffer_previewer_maker` de
+Telescope. La coloration suit les métadonnées du backend, même pour un ancien
+scratchpad Mongo en `.sql`. Les entrées de création, les métadonnées invalides
+et les fichiers manquants affichent un message. L’aperçu n’appelle pas
+`scratch.open`, n’attache pas de contexte et ne lance aucune requête.
+
 `DbTables` est le contrat de compatibilité PostgreSQL ; `DbRelations` est le
 parcours de relations canonique. Ne pas réintroduire `backend.levels` ni une
 navigation globale.

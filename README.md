@@ -753,6 +753,10 @@ root. Syntax highlighting follows the backend, including after a connection
 change; existing files retain their path. Your language tools and persistent
 undo work normally, and scratchpads survive restarts.
 
+The Telescope picker previews the highlighted scratchpad's content with SQL or
+JavaScript highlighting. If the file is already open, the preview includes its
+unsaved changes. Previewing does not open or execute the scratchpad.
+
 Scratchpads do not share an in-memory global context. Opening two of them keeps
 their sessions independent, just like ordinary SQL buffers.
 
