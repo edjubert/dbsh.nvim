@@ -255,6 +255,11 @@ unexpected password prompt, and it is the single most common setup mistake.
 Snowflake profiles use the `snow` CLI only. They are structured profiles: do not
 use a JDBC URL, a Snow CLI named connection, or a literal password.
 
+The current authentication flow uses a native SSO authenticator and
+`password_command`, matching the maintainer's use case. This is the approach
+implemented for now; the maintainer is open to adding other authentication
+methods.
+
 ```lua
 require("dbsh").setup({
 	connections = {
@@ -328,6 +333,11 @@ New Mongo scratchpads are saved as `.js`; existing `.sql` scratchpads are
 reopened with JavaScript highlighting and keep their contents.
 
 ### AWS IAM authentication
+
+For now, AWS authentication relies on AWS CLI profiles, matching the maintainer's
+use case. The maintainer is open to adding other AWS credential sources and
+MongoDB authentication methods. Password-based MongoDB authentication remains
+available as described above.
 
 For Atlas `MONGODB-AWS`, select an AWS CLI profile instead of a password command:
 
