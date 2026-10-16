@@ -23,6 +23,8 @@ function M._telescope()
 		conf = require("telescope.config").values,
 		actions = require("telescope.actions"),
 		state = require("telescope.actions.state"),
+		previewers = require("telescope.previewers"),
+		preview_utils = require("telescope.previewers.utils"),
 	}
 end
 
@@ -49,6 +51,7 @@ local function open(t, opts)
 			entry_maker = opts.entry_maker,
 		}),
 		sorter = t.conf.generic_sorter({}),
+		previewer = opts.previewer,
 		attach_mappings = opts.attach_mappings,
 	}):find()
 end
@@ -213,6 +216,7 @@ function M.scratchpads()
 
 	open(t, {
 		title = "dbsh scratchpads",
+		previewer = t.previewers and require("dbsh.telescope.scratch_preview").new(t) or nil,
 		results = items,
 		entry_maker = scratchpad_entry,
 		attach_mappings = function(bufnr, map)
