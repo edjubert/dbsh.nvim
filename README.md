@@ -6,8 +6,8 @@
 
 # dbsh.nvim
 
-Query PostgreSQL from Neovim without leaving your editor, without blocking it,
-and without exposing a password to `psql`.
+Query PostgreSQL, Snowflake, and MongoDB from Neovim without leaving your editor
+or blocking it.
 
 <!--
 SCREENSHOT docs/media/hero.png
@@ -105,8 +105,9 @@ is not the connection's namesake, then the schema in scope.
 
 - Neovim **0.10+** — the plugin uses `vim.system`, `vim.fn.getregion` and
   `vim.fs.joinpath`
-- `psql` on your `PATH`
+- `psql` on your `PATH` when using PostgreSQL profiles
 - `snow` on your `PATH` when using Snowflake profiles
+- `mongosh` on your `PATH` when using MongoDB profiles
 - [telescope.nvim](https://github.com/nvim-telescope/telescope.nvim) — **optional**;
   every picker degrades to a clear message without it, and queries work fine
 - [postgres-language-server](https://github.com/supabase-community/postgres-language-server) —
