@@ -1,3 +1,9 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/media/logo/dbsh-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="docs/media/logo/dbsh-light.svg">
+  <img src="docs/media/logo/dbsh-light.svg" alt="dbsh.nvim — database shells inside Neovim" width="760" height="240">
+</picture>
+
 # dbsh.nvim
 
 Query PostgreSQL from Neovim without leaving your editor, without blocking it,

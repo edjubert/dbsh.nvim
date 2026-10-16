@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">dbsh.nvim — monochrome</title>
+  <desc id="desc">A database cylinder containing a terminal prompt, drawn in one color.</desc>
+  <g fill="none" stroke="currentColor" stroke-width="12" stroke-linecap="round" stroke-linejoin="round">
+    <ellipse cx="128" cy="56" rx="76" ry="26"/>
+    <path d="M52 56v138c0 14.36 34.03 26 76 26s76-11.64 76-26V56"/>
+    <path d="M52 162c0 14.36 34.03 26 76 26s76-11.64 76-26"/>
+    <path d="m86 103 25 23-25 23"/>
+    <path d="M139 149h27"/>
+  </g>
+</svg>
