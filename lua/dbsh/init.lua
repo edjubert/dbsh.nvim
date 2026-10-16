@@ -7,6 +7,7 @@ local progress = require("dbsh.progress")
 local context = require("dbsh.context")
 local exec = require("dbsh.exec")
 local results = require("dbsh.results")
+local csvview = require("dbsh.csvview")
 local definitions = require("dbsh.definitions")
 local csv = require("dbsh.csv")
 local export = require("dbsh.export")
@@ -19,7 +20,7 @@ local M = {}
 local last_queries = {}
 
 local function active_snapshot()
-	return results.context_snapshot(0) or context.snapshot(0)
+	return csvview.context_snapshot(0) or results.context_snapshot(0) or context.snapshot(0)
 end
 
 local function notify_sql_connection(bufnr)
@@ -57,15 +58,20 @@ function M.last_query(bufnr_or_snapshot)
 		snapshot = bufnr_or_snapshot
 	else
 		snapshot = results.context_snapshot(bufnr_or_snapshot or 0)
+			or csvview.context_snapshot(bufnr_or_snapshot or 0)
 			or context.snapshot(bufnr_or_snapshot or 0)
 	end
 	return last_queries[snapshot.id]
 end
 
-local function run_query(sql, snapshot)
+local function run_query(sql, snapshot, opts)
 	last_queries[snapshot.id] = sql
 	resolve.preamble(sql, snapshot, function(preamble)
 		if preamble == nil then
+			return
+		end
+		if opts and opts.csv_view then
+			csvview.run(sql, snapshot, preamble, opts.csv_view)
 			return
 		end
 
@@ -95,14 +101,14 @@ local function run_query(sql, snapshot)
 	end)
 end
 
-function M.query(sql)
+function M.query(sql, snapshot, opts)
 	sql = vim.trim(sql or "")
 	if sql == "" then
 		vim.notify("dbsh.nvim: query is empty", vim.log.levels.WARN)
 		return
 	end
 
-	local snapshot = context.snapshot(0)
+	snapshot = snapshot or context.snapshot(0)
 	-- Only the first return value: a buffer without a connection falls back to
 	-- the SQL classifier, and exec.run reports the missing connection itself.
 	local backend = context.backend(snapshot)
@@ -112,12 +118,12 @@ function M.query(sql)
 			prompt = string.format("dbsh.nvim: confirm %s SQL: ", classification.reason),
 		}, function(choice)
 			if choice == "Run" then
-				run_query(sql, snapshot)
+				run_query(sql, snapshot, opts)
 			end
 		end)
 		return
 	end
-	run_query(sql, snapshot)
+	run_query(sql, snapshot, opts)
 end
 
 -- Mappings are global, so a query mapping fires just as well from a focused
@@ -125,7 +131,7 @@ end
 -- echoed query: reading the buffer would silently re-run it. M.query itself
 -- stays unguarded -- it receives its text and remains callable from anywhere.
 local function reading_own_output()
-	if results.context_snapshot(0) == nil then
+	if results.context_snapshot(0) == nil and csvview.context_snapshot(0) == nil then
 		return false
 	end
 	vim.notify(
@@ -257,9 +263,11 @@ function M.yank_csv()
 end
 
 local function query_to_export(opts)
+	local source = csvview.source(0)
+	if source then return source.query, source.snapshot end
 	local result_snapshot = results.context_snapshot(0)
 	if result_snapshot ~= nil then
-		return M.last_query(result_snapshot), result_snapshot
+		return vim.b.dbsh_result_query or M.last_query(result_snapshot), result_snapshot
 	end
 
 	local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
@@ -270,6 +278,20 @@ local function query_to_export(opts)
 		start, stop = M.paragraph_range(lines, vim.api.nvim_win_get_cursor(0)[1])
 	end
 	return table.concat(vim.list_slice(lines, start, stop), "\n"), context.snapshot(0)
+end
+
+function M.csv_view(opts)
+	local query, snapshot = query_to_export(opts)
+	if not context.is_current(snapshot) then
+		vim.notify("dbsh.nvim: source context changed; run the query again before opening CSVView", vim.log.levels.WARN)
+		return
+	end
+	local prepared, err = csvview.prepare(snapshot)
+	if prepared == nil then
+		vim.notify("dbsh.nvim: " .. err, vim.log.levels.WARN)
+		return
+	end
+	M.query(query, snapshot, { csv_view = prepared })
 end
 
 function M.export_csv(opts)
@@ -331,7 +353,8 @@ local function dispatch_contract(kind, key, command_name)
 		vim.notify("dbsh.nvim: " .. err, vim.log.levels.WARN)
 		return
 	end
-	if contract_for(backend, kind, key) == nil then
+	local definition = contract_for(backend, kind, key)
+	if definition == nil or "Db" .. definition.command ~= command_name then
 		vim.notify(
 			string.format("dbsh.nvim: %s is not available for %s", command_name, backend.name),
 			vim.log.levels.WARN
@@ -381,6 +404,7 @@ local function declare_commands()
 		end
 	end, {})
 	command("DbExportCSV", function(opts) M.export_csv(opts) end, { range = true })
+	command("DbCSVView", function(opts) M.csv_view(opts) end, { range = true })
 	command("DbLspStatus", function()
 		vim.notify(lsp.status_message(context.snapshot(0)))
 	end, {})
@@ -499,6 +523,7 @@ function M.setup(opts)
 		group = group,
 		callback = function()
 			credentials.clear()
+			require("dbsh.aws").clear()
 		end,
 	})
 

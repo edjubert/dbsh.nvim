@@ -14,6 +14,10 @@ local T = MiniTest.new_set({
 				connections = {
 					local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
 					staging = { host = "db.example.com", port = 5432, database = "app", username = "readonly" },
+					atlas = {
+						type = "mongo", srv = true, host = "cluster.example.test", database = "analytics",
+						username = "analyst", password_command = { "password-command" },
+					},
 				},
 				default = "local_db",
 			})
@@ -44,6 +48,34 @@ T["creates a session-scoped scratch buffer"] = function()
 	eq(vim.bo[buf].buftype, "nofile")
 	eq(vim.bo[buf].filetype, "sql")
 	eq(results.context_snapshot(buf).id, snapshots.a.id)
+end
+
+T["uses JavaScript for Mongo output from the captured source context"] = function()
+	assert(context.bind(snapshots.b.bufnr, "atlas"))
+	snapshots.b = context.snapshot(snapshots.b.bufnr)
+	eq(context.snapshot(0).backend_name, "postgres")
+	local buf = results.running(snapshots.b, 'db.getCollection("branches").find({})')
+	eq(vim.bo[buf].filetype, "javascript")
+	eq(vim.bo[buf].buftype, "nofile")
+	results.render(snapshots.b, 'db.getCollection("branches").find({})', '[{ _id: ObjectId("123") }]')
+	eq(vim.bo[buf].filetype, "javascript")
+	eq(vim.bo[buf].modifiable, false)
+end
+
+T["updates the language of a reused result buffer when its backend changes"] = function()
+	local source = snapshots.a.bufnr
+	assert(context.bind(source, "local_db"))
+	snapshots.a = context.snapshot(source)
+	local buf = results.render(snapshots.a, "SELECT 1;", "one")
+	eq(vim.bo[buf].filetype, "sql")
+	assert(context.bind(source, "atlas"))
+	snapshots.a = context.snapshot(source)
+	eq(results.render(snapshots.a, "db.branches.find({})", "[]"), buf)
+	eq(vim.bo[buf].filetype, "javascript")
+	-- Also update an existing Mongo result created by an older plugin version.
+	vim.bo[buf].filetype = "sql"
+	eq(results.open(snapshots.a), buf)
+	eq(vim.bo[buf].filetype, "javascript")
 end
 
 T["disables wrapping so wide tables scroll horizontally"] = function()

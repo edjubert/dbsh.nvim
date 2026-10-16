@@ -50,6 +50,22 @@ T["asks for no decoration in raw mode"] = function()
 	expect_match(preamble, "ON_ERROR_STOP")
 end
 
+T["uses native CSV with headers and no footer for CSVView"] = function()
+	local argv = postgres.argv(conn, "/tmp/script.sql", postgres.csv_mode)
+	eq(vim.tbl_contains(argv, "--csv"), true)
+	eq(vim.tbl_contains(argv, "-t"), false)
+	expect_match(postgres.preamble(postgres.csv_mode), "ON_ERROR_STOP")
+	expect_match(postgres.preamble(postgres.csv_mode), "\\pset footer off")
+	eq(postgres.preamble(postgres.csv_mode):find("\\timing on", 1, true), nil)
+end
+
+T["keeps PostgreSQL statements and comments intact when producing native CSV"] = function()
+	local query = 'SELECT email, profile_id FROM "authentication"."app_users"; -- comment\n/* trailing comment */'
+	eq(postgres.csv_query(query, ","), "\\pset csv_fieldsep ','\n" .. query)
+	eq(postgres.csv_query("SELECT ';', $$semi;colon$$;\nSELECT 2;", ";"),
+		"\\pset csv_fieldsep ';'\nSELECT ';', $$semi;colon$$;\nSELECT 2;")
+end
+
 T["passes PGCONNECT_TIMEOUT and never PGPASSWORD"] = function()
 	local env = postgres.env(conn, { connect_timeout = 7 })
 	eq(env.PGCONNECT_TIMEOUT, "7")

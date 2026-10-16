@@ -323,6 +323,7 @@ T["rejects an invalid mongo profile through its backend validator"] = function()
 			atlas = {
 				type = "mongo", srv = true, host = "cluster0.example.mongodb.net",
 				username = "analyst", database = "analytics",
+				proxy = { host = "127.0.0.1", port = 0 },
 				password_command = { "password-command" },
 			},
 		},

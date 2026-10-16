@@ -23,6 +23,8 @@ function M._telescope()
 		conf = require("telescope.config").values,
 		actions = require("telescope.actions"),
 		state = require("telescope.actions.state"),
+		previewers = require("telescope.previewers"),
+		preview_utils = require("telescope.previewers.utils"),
 	}
 end
 
@@ -49,8 +51,8 @@ local function open(t, opts)
 			entry_maker = opts.entry_maker,
 		}),
 		sorter = t.conf.generic_sorter({}),
+		previewer = opts.previewer,
 		attach_mappings = opts.attach_mappings,
-		on_input_filter_cb = opts.on_input_filter_cb,
 	}):find()
 end
 
@@ -214,6 +216,7 @@ function M.scratchpads()
 
 	open(t, {
 		title = "dbsh scratchpads",
+		previewer = t.previewers and require("dbsh.telescope.scratch_preview").new(t) or nil,
 		results = items,
 		entry_maker = scratchpad_entry,
 		attach_mappings = function(bufnr, map)
@@ -234,8 +237,8 @@ local function contract_for(backend, kind, key)
 	return nil
 end
 
-local function current_backend()
-	local snapshot = context.snapshot(0)
+local function current_backend(snapshot)
+	snapshot = snapshot or context.snapshot(0)
 	local backend, err = context.backend(snapshot)
 	if backend == nil then
 		return nil, nil, err
@@ -300,7 +303,6 @@ local function choose(title, items, callback, options)
 		}, callback)
 		return
 	end
-	local close_picker
 	open(t, {
 		title = title,
 		results = items,
@@ -308,15 +310,7 @@ local function choose(title, items, callback, options)
 			local label = item_label(item)
 			return { value = item, display = label, ordinal = label }
 		end,
-		on_input_filter_cb = options.on_input_filter_cb and function(prompt)
-			options.on_input_filter_cb(prompt, function()
-				if close_picker ~= nil then
-					close_picker()
-				end
-			end)
-		end or nil,
 		attach_mappings = function(bufnr, map)
-			close_picker = function() t.actions.close(bufnr) end
 			bind_enter(t, bufnr, map, function(entry)
 				callback(entry and entry.value)
 			end)
@@ -374,7 +368,7 @@ end
 
 function M.context(key, options)
 	options = options or {}
-	local snapshot, backend, err = current_backend()
+	local snapshot, backend, err = current_backend(options.snapshot)
 	if backend == nil then
 		return notify_error(err)
 	end
@@ -383,33 +377,47 @@ function M.context(key, options)
 		return notify_error(string.format("%s is not available for %s", key, backend.name))
 	end
 
-	catalog.request(snapshot, definition, {
-		query = options.query,
-		cursor = options.cursor,
-	}, function(page, request_err)
-		if request_err ~= nil then
-			return notify_error(request_err)
-		end
-		local items = vim.deepcopy(page.items)
-		if options.preferred ~= nil then
-			table.sort(items, function(a, b)
-				return a.value == options.preferred and b.value ~= options.preferred
-			end)
-		end
-		choose(titled("dbsh " .. definition.title:lower(), snapshot), items, function(item)
-			if item == nil then
+	local active_query = options.query or ""
+	local function load(cursor, query)
+		catalog.request(snapshot, definition, {
+			query = query,
+			cursor = cursor,
+		}, function(page, request_err)
+			if request_err ~= nil then
+				return notify_error(request_err)
+			end
+			if not context.is_current(snapshot) then
 				return
 			end
-			local value = item.value ~= nil and item.value or item
-			local applied, apply_err = definition.apply(snapshot, value)
-			if applied == nil then
-				return notify_error(apply_err)
+			local items = vim.deepcopy(page.items)
+			if options.preferred ~= nil then
+				table.sort(items, function(a, b)
+					return a.value == options.preferred and b.value ~= options.preferred
+				end)
 			end
-			if options.on_selected ~= nil then
-				options.on_selected(value, context.snapshot(snapshot.bufnr))
+			local more = catalog.load_more_entry(page)
+			if more ~= nil then
+				table.insert(items, more)
 			end
+			choose(titled("dbsh " .. definition.title:lower(), snapshot), items, function(item)
+				if item == nil or not context.is_current(snapshot) then
+					return
+				end
+				if item.kind == "more" then
+					return load(item.cursor, active_query)
+				end
+				local value = item.value ~= nil and item.value or item
+				local applied, apply_err = definition.apply(snapshot, value)
+				if applied == nil then
+					return notify_error(apply_err)
+				end
+				if options.on_selected ~= nil then
+					options.on_selected(value, context.snapshot(snapshot.bufnr))
+				end
+			end)
 		end)
-	end)
+	end
+	load(options.cursor, active_query)
 end
 
 function M.objects()
@@ -451,34 +459,17 @@ local function choose_scope(snapshot, callback)
 			return
 		end
 		M.context("schema", {
-			on_selected = function(value)
-				callback({ schema = value, all_schemas = false })
+			snapshot = snapshot,
+			on_selected = function(value, selected_snapshot)
+				callback({ schema = value, all_schemas = false }, selected_snapshot)
 			end,
 		})
 	end)
 end
 
-function M._debounce(callback)
-	if M._debounce_timer ~= nil then
-		M._debounce_timer:stop()
-		M._debounce_timer:close()
-	end
-	local timer = (vim.uv or vim.loop).new_timer()
-	M._debounce_timer = timer
-	timer:start(100, 0, vim.schedule_wrap(function()
-		if M._debounce_timer ~= timer then
-			return
-		end
-		M._debounce_timer = nil
-		timer:stop()
-		timer:close()
-		callback()
-	end))
-end
-
 function M.catalog(key, options)
 	options = options or {}
-	local snapshot, backend, err = current_backend()
+	local snapshot, backend, err = current_backend(options.snapshot)
 	if backend == nil then
 		return notify_error(err)
 	end
@@ -487,8 +478,24 @@ function M.catalog(key, options)
 	if definition == nil then
 		return notify_error(string.format("%s is not available for %s", key, backend.name))
 	end
+	if definition.parent ~= nil and options.relation == nil then
+		return M.catalog(definition.parent, {
+			snapshot = snapshot,
+			query = options.query,
+			on_selected = function(item)
+				if context.is_current(snapshot) then
+					M.catalog(key, {
+						snapshot = snapshot,
+						relation = type(item.value) == "table" and item.value or item,
+						scope = options.scope,
+					})
+				end
+			end,
+		})
+	end
 
-	local function open_scope(scope)
+	local function open_scope(scope, selected_snapshot)
+		snapshot = selected_snapshot or snapshot
 		local active_query = options.query or ""
 		local function load(cursor, query)
 			catalog.request(snapshot, definition, {
@@ -500,6 +507,9 @@ function M.catalog(key, options)
 				if request_err ~= nil then
 					return notify_error(request_err)
 				end
+				if not context.is_current(snapshot) then
+					return
+				end
 				local items = vim.deepcopy(page.items)
 				local more = catalog.load_more_entry(page)
 				if more ~= nil then
@@ -510,15 +520,20 @@ function M.catalog(key, options)
 					snapshot,
 					scope and scope.schema
 				)
+				if definition.parent ~= nil and options.relation ~= nil then
+					title = title .. " - " .. options.relation.name
+				end
 				choose(title, items, function(item)
-					if item == nil then
+					if item == nil or not context.is_current(snapshot) then
 						return
 					end
 					if item.kind == "more" then
 						return load(item.cursor, active_query)
 					end
-					if definition.on_select ~= nil then
-						definition.on_select(item, snapshot)
+					if options.on_selected ~= nil then
+						options.on_selected(item, snapshot)
+					elseif definition.on_select ~= nil then
+						definition.on_select(item, snapshot, config.options())
 					elseif definition.definition then
 						local object = type(item.value) == "table" and item.value or item
 						local opened, definition_err = require("dbsh.definitions").open(snapshot, object)
@@ -528,12 +543,12 @@ function M.catalog(key, options)
 					end
 				end, {
 					on_inspect = definition.inspect and function(item)
-						if item.kind == "more" then
+						if item.kind == "more" or not context.is_current(snapshot) then
 							return
 						end
 						local actions = definition.inspect(item, snapshot) or {}
 						choose("dbsh relation inspector", actions, function(action)
-							if action == nil then
+							if action == nil or not context.is_current(snapshot) then
 								return
 							end
 							if action.definition then
@@ -547,32 +562,19 @@ function M.catalog(key, options)
 								return
 							end
 							if action.action ~= nil then
-								action.action(item, snapshot)
+								action.action(item, snapshot, config.options())
 								return
 							end
 							local child = action.catalog or action.inspector
 							if child ~= nil then
 								M.catalog(child, {
+									snapshot = snapshot,
 									scope = scope,
 									relation = action.relation,
 								})
 							end
 						end)
 					end or nil,
-					on_input_filter_cb = function(query_value, close)
-						if query_value == active_query then
-							return
-						end
-						active_query = query_value
-						local requested_query = query_value
-						M._debounce(function()
-							if requested_query ~= active_query then
-								return
-							end
-							close()
-							load(nil, requested_query)
-						end)
-					end,
 				})
 			end)
 		end
