@@ -84,6 +84,10 @@ local function metadata_error(id, detail)
 	return string.format("invalid metadata for scratchpad %s: %s", id, detail)
 end
 
+local function announce()
+	vim.api.nvim_exec_autocmds("User", { pattern = "DbshScratchChanged", modeline = false })
+end
+
 function M.write_metadata(value)
 	local item = metadata(value)
 	local path = stem(item.id) .. ".json"
@@ -103,6 +107,7 @@ function M.write_metadata(value)
 		vim.fn.delete(tmp)
 		return nil, err or "could not replace metadata"
 	end
+	announce()
 	return item
 end
 
@@ -259,7 +264,14 @@ function M.open(id)
 
 	local path = M.paths(id, item.backend)
 	vim.fn.mkdir(M.dir(), "p")
-	vim.cmd("edit " .. vim.fn.fnameescape(path))
+	local existing = vim.fn.bufnr(path)
+	if existing ~= -1 and vim.api.nvim_buf_is_loaded(existing) then
+		-- :edit would reload a currently modified pad or reject it with E37.
+		-- Reusing its buffer keeps unsaved text intact when opened from a panel.
+		vim.cmd("hide buffer " .. existing)
+	else
+		vim.cmd("hide edit " .. vim.fn.fnameescape(path))
+	end
 
 	local connection, connection_err = config.connection(item.connection_name)
 	if connection == nil and item.connection_name ~= nil then

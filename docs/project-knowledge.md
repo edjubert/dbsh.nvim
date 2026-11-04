@@ -176,6 +176,33 @@ Every Telescope picker filters its loaded entries locally: typing does not run
 a query or reopen the picker. Paginated catalogs keep an explicit “Load more”
 action; `query` values passed to the Lua API are still sent to the backend.
 
+`DbPanel [open|close|toggle]` exposes a tab-local sidebar without requiring
+Telescope. `panel_tree.lua` builds its connection/database/schema/relation tree
+from configured profiles, runtime contexts, scratchpad metadata and catalog
+cache entries. MongoDB collections live directly under their databases.
+The scratchpad/file section groups persistent scratchpads and open query files
+by connection; internal result and definition buffers are excluded.
+
+`catalog.lua` caches successful validated pages in memory, with keys scoped by
+public profile identity, effective levels, catalog/selector, schema scope,
+literal filter, relation and page size. A matching next-page cursor appends;
+a first-page refresh replaces that inventory. Partial and filtered fragments
+remain distinguishable. `setup()` clears the cache, and stale generations or
+older callbacks cannot repopulate it. Cache entries contain only public data.
+
+Rendering and folding never call a backend. `r` and explicit load rows fetch
+one branch/page using a public captured context. `context.from_public`
+reconstructs the private execution profile at the backend boundary and checks
+the source generation; PostgreSQL, Snowflake and MongoDB catalog runners use
+it instead of reading the focused sidebar buffer. Browsing a branch does not
+bind or change the source buffer. `s` applies a context to the remembered query
+buffer; table previews receive its selected snapshot explicitly.
+
+`DbshCatalogChanged`, `DbshContextChanged`, `DbshScratchChanged` and buffer
+events redraw visible panels without moving focus. Source context changes
+cancel pending sidebar introspection. Panels retain folds when hidden, follow
+the last entered query buffer per tab, and never receive a query binding.
+
 `DbTemp` provides a `new_buffer_previewer` through
 `telescope/scratch_preview.lua`. It copies contents from a buffer that is
 already loaded, including unsaved changes; otherwise, it delegates the

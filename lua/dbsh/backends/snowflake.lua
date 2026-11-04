@@ -615,9 +615,14 @@ function M.catalog_query(key, request)
 	return spec.query(spec, request)
 end
 
-local function fetch(sql, callback)
+local function fetch(sql, request, callback)
 	local exec = require("dbsh.exec")
-	exec.run(sql, { mode = "raw", slot = "introspect" }, function(code, stdout, stderr)
+	local snapshot, err = require("dbsh.context").from_public(request.context)
+	if snapshot == nil then
+		callback(nil, err)
+		return
+	end
+	exec.run(sql, { context = snapshot, mode = "raw", slot = "introspect" }, function(code, stdout, stderr)
 		if code ~= 0 then
 			callback(nil, stderr ~= "" and stderr or "snow sql failed")
 			return
@@ -664,7 +669,7 @@ local function list_catalog(key)
 			callback(nil, err)
 			return
 		end
-		fetch(sql, function(rows, fetch_err)
+		fetch(sql, request, function(rows, fetch_err)
 			if rows == nil then
 				callback(nil, fetch_err)
 				return
@@ -710,7 +715,7 @@ local function apply_context(key)
 	end
 end
 
-local function select_relation(item)
+local function select_relation(item, snapshot)
 	local object = type(item.value) == "table" and item.value or item
 	if object.database == nil or object.schema == nil or object.name == nil then
 		return
@@ -722,7 +727,7 @@ local function select_relation(item)
 		quote_ident(object.schema),
 		quote_ident(object.name),
 		config.options().preview_limit
-	))
+	), snapshot)
 end
 
 M.catalogs = {

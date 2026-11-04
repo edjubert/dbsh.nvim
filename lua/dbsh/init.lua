@@ -14,13 +14,23 @@ local export = require("dbsh.export")
 local resolve = require("dbsh.resolve")
 local safety = require("dbsh.safety")
 local lsp = require("dbsh.lsp")
+local panel = require("dbsh.panel")
+local catalog = require("dbsh.catalog")
 
 local M = {}
 
 local last_queries = {}
 
 local function active_snapshot()
-	return csvview.context_snapshot(0) or results.context_snapshot(0) or context.snapshot(0)
+	return panel.source_snapshot() or csvview.context_snapshot(0) or results.context_snapshot(0) or context.snapshot(0)
+end
+
+function M.panel(action)
+	action = action or "toggle"
+	if action == "open" then return panel.open() end
+	if action == "close" then return panel.close() end
+	if action == "toggle" then return panel.toggle() end
+	vim.notify("dbsh.nvim: DbPanel expects open, close, or toggle", vim.log.levels.WARN)
 end
 
 local function notify_sql_connection(bufnr)
@@ -131,6 +141,10 @@ end
 -- echoed query: reading the buffer would silently re-run it. M.query itself
 -- stays unguarded -- it receives its text and remains callable from anywhere.
 local function reading_own_output()
+	if panel.is_panel(0) then
+		vim.notify("dbsh.nvim: select a query buffer before running a query", vim.log.levels.WARN)
+		return true
+	end
 	if results.context_snapshot(0) == nil and csvview.context_snapshot(0) == nil then
 		return false
 	end
@@ -281,6 +295,9 @@ local function query_to_export(opts)
 end
 
 function M.csv_view(opts)
+	if panel.is_panel(0) then
+		return vim.notify("dbsh.nvim: select a query buffer before opening CSVView", vim.log.levels.WARN)
+	end
 	local query, snapshot = query_to_export(opts)
 	if not context.is_current(snapshot) then
 		vim.notify("dbsh.nvim: source context changed; run the query again before opening CSVView", vim.log.levels.WARN)
@@ -295,6 +312,9 @@ function M.csv_view(opts)
 end
 
 function M.export_csv(opts)
+	if panel.is_panel(0) then
+		return vim.notify("dbsh.nvim: select a query buffer before exporting", vim.log.levels.WARN)
+	end
 	local sql, snapshot = query_to_export(opts)
 	sql = vim.trim(sql or "")
 	if sql == "" then
@@ -348,7 +368,8 @@ local function contract_for(backend, kind, key)
 end
 
 local function dispatch_contract(kind, key, command_name)
-	local backend, err = context.backend(context.snapshot(0))
+	local snapshot = active_snapshot()
+	local backend, err = context.backend(snapshot)
 	if backend == nil then
 		vim.notify("dbsh.nvim: " .. err, vim.log.levels.WARN)
 		return
@@ -362,25 +383,37 @@ local function dispatch_contract(kind, key, command_name)
 		return
 	end
 	if kind == "contexts" then
-		pickers().context(key)
+		pickers().context(key, { snapshot = snapshot })
 	else
-		pickers().catalog(key)
+		pickers().catalog(key, { snapshot = snapshot })
 	end
 end
 
 local function declare_commands()
 	local command = vim.api.nvim_create_user_command
 
-	command("DbConnections", function() pickers().connections() end, {})
+	command("DbPanel", function(opts) M.panel(opts.args ~= "" and opts.args or nil) end, {
+		nargs = "?", complete = function() return { "open", "close", "toggle" } end,
+	})
+	command("DbConnections", function()
+		panel.focus_source()
+		pickers().connections()
+	end, {})
 	command("DbGlobalConnection", function() pickers().global_connection() end, {})
 	command("DbForgetConnection", function()
-		local _, err = context.forget(0, "forget")
+		local _, err = context.forget(active_snapshot().bufnr, "forget")
 		if err ~= nil then
 			vim.notify("dbsh.nvim: " .. err, vim.log.levels.WARN)
 		end
 	end, {})
-	command("DbTemp", function() pickers().scratchpads() end, {})
-	command("DbObjects", function() pickers().objects() end, {})
+	command("DbTemp", function()
+		panel.focus_source()
+		pickers().scratchpads()
+	end, {})
+	command("DbObjects", function()
+		panel.focus_source()
+		pickers().objects()
+	end, {})
 	command("DbDefinitions", function() pickers().definitions() end, {})
 	command("DbToggleDefinition", function()
 		if not definitions.toggle(active_snapshot()) then
@@ -406,11 +439,11 @@ local function declare_commands()
 	command("DbExportCSV", function(opts) M.export_csv(opts) end, { range = true })
 	command("DbCSVView", function(opts) M.csv_view(opts) end, { range = true })
 	command("DbLspStatus", function()
-		vim.notify(lsp.status_message(context.snapshot(0)))
+		vim.notify(lsp.status_message(active_snapshot()))
 	end, {})
 
 	command("DbInfo", function()
-		local snapshot = context.snapshot(0)
+		local snapshot = active_snapshot()
 		local connection = snapshot.connection
 		if connection == nil or snapshot.connection_name == nil then
 			vim.notify("dbsh.nvim: no current connection", vim.log.levels.WARN)
@@ -448,6 +481,8 @@ end
 function M.setup(opts)
 	config.setup(opts)
 	context.setup()
+	catalog.clear()
+	panel.setup()
 	lsp.setup()
 	last_queries = {}
 	declare_commands()

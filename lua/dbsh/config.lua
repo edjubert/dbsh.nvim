@@ -23,6 +23,7 @@ local defaults = {
 	csv_delimiter = ",",
 	export_dir = vim.fs.joinpath(vim.fn.stdpath("data"), "dbsh", "exports"),
 	results_split = "horizontal",
+	panel = { width = 40, position = "left" },
 	variable_patterns = {},
 	safety = { mode = "confirm" },
 	lsp = {
@@ -139,6 +140,12 @@ function M.setup(opts)
 	end
 	M.state.opts = vim.tbl_deep_extend("force", vim.deepcopy(defaults), input)
 	normalize_lsp(raw_lsp)
+	if type(M.state.opts.panel) ~= "table"
+		or not valid_positive_finite_integer(M.state.opts.panel.width)
+		or (M.state.opts.panel.position ~= "left" and M.state.opts.panel.position ~= "right") then
+		warn("panel must be { width = positive integer, position = 'left' or 'right' }; using the defaults")
+		M.state.opts.panel = vim.deepcopy(defaults.panel)
+	end
 	if not valid_positive_finite_integer(M.state.opts.catalog_page_size) then
 		warn("catalog_page_size must be a positive integer; using 200")
 		M.state.opts.catalog_page_size = defaults.catalog_page_size

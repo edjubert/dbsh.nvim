@@ -57,6 +57,7 @@ changed.
 | Authentication | password or hash stored in your Neovim config | `~/.pgpass`, resolved by `psql` itself |
 | Switching database | one Lua file per connection, hand-written | context scoped to the active buffer |
 | Schema browsing | none | paged contexts and PostgreSQL object catalogs |
+| Sidebar | none | cached connection/database/schema/table tree, plus scratchpads and associated files |
 | Ad-hoc queries | scratch buffer, lost on exit | named scratchpads with independent metadata |
 | Getting data out | one cell at a time | CSV to file, or CSV from a visual selection |
 | Result buffer | soft-wrapped, editable | horizontal scroll, read-only |
@@ -196,6 +197,7 @@ require("dbsh").setup({
 	csv_delimiter = ",",
 	export_dir = vim.fs.joinpath(vim.fn.stdpath("data"), "dbsh", "exports"),
 	results_split = "horizontal",
+	panel = { width = 40, position = "left" },
 	variable_patterns = {}, -- e.g. { ":(raw_data)" }, see SQL variables below
 	safety = { mode = "confirm" }, -- "confirm" or "off"
 	progress = {
@@ -221,6 +223,7 @@ require("dbsh").setup({
 | `csv_delimiter` | `","` | Column separator, for both CSV export and CSV yank. |
 | `export_dir` | `<stdpath("data")>/dbsh/exports` | Where `:DbExportCSV` suggests writing. |
 | `results_split` | `"horizontal"` | `"horizontal"`, `"vertical"` or `"float"`: which window opens `__DBSH__` in. Only applies the first time the window is created; combine with `vim.opt.splitright = true` for a right-hand split. `"float"` is styled after your telescope config, when installed, and takes the cursor when a query starts -- unfocused it could neither be scrolled nor closed; `q` or `<Esc>` closes it and hands the cursor back. A split never takes the cursor: the point of it is to keep typing. Output arriving never moves the cursor either way. |
+| `panel` | `{ width = 40, position = "left" }` | Sidebar width in columns and side (`"left"` or `"right"`). Open it with `:DbPanel`; Telescope is optional. |
 | `variable_patterns` | `{}` | Lua patterns (one capture each) naming SQL variables to prompt for. See [SQL variables](#sql-variables). |
 | `safety` | `{ mode = "confirm" }` | Confirms mutating or ambiguous SQL. Use `{ mode = "off" }` to disable the ergonomic guardrail. |
 | `progress` | `{ enabled = true, delay_ms = 300, summary_width = 60 }` | Reports operations while they run. `delay_ms` is how long dbsh waits before displaying anything; `0` displays immediately. `summary_width` truncates the SQL excerpt. See [Progress indicator](#progress-indicator). |
@@ -462,6 +465,7 @@ no patched PgLS binary is required.
 
 | Command | Description |
 |---|---|
+| `:DbPanel [open\|close\|toggle]` | toggle the cached sidebar; the optional action opens, closes, or toggles it explicitly |
 | `:DbConnections` | pick a connection |
 | `:DbTemp` | open the named scratchpad picker |
 | `:DbObjects` | choose an object catalog |
@@ -744,6 +748,43 @@ delivery, classify its own statements, and declare non-tabular output. Context s
 yank, scratchpads, variable prompts, and export file handling — is shared and
 knows nothing about any particular database.
 
+## Sidebar
+
+`:DbPanel` opens a sidebar in the current tab, independent of Telescope.
+It shows connections, databases, schemas and tables/views; MongoDB databases
+contain collections directly. A **Scratchpads / files** section groups saved
+scratchpads and open query files by connection. Reopening a scratchpad keeps
+its unsaved buffer contents.
+
+Opening, folding and expanding the tree perform no database requests. The
+inventory combines configured contexts, buffer and scratchpad contexts, and
+catalog pages already loaded by the sidebar or existing pickers. Catalog data
+is cached in memory for the Neovim session and reset by `setup()`. A filtered
+or partial page supplies known objects without implying a complete inventory.
+
+| Key | Action |
+|---|---|
+| `<CR>`, `o` | toggle a branch, open a scratchpad/file, or preview a table |
+| `h`, `<Left>` | collapse a branch or move to its parent |
+| `l`, `<Right>` | expand a branch or move to its first child; open a leaf |
+| `s` | select the connection/database/schema for the query buffer beside the panel |
+| `r` | fetch or refresh the selected branch's first catalog page |
+| `<CR>` on **Load… / Load more…** | explicitly fetch that page |
+| `g` | rebuild the display from local state |
+| `zR`, `zM` | expand/collapse every known branch |
+| `q` | close the sidebar |
+
+Fetching a branch reads only its own catalog, without recursively fetching its
+children or remaining pages. A fetch uses the branch's captured context and
+leaves the query buffer's selected connection unchanged. Selecting a database
+with `s` clears its previous schema. Selecting or previewing an object affects
+the source buffer; the panel never becomes a query context.
+
+The sidebar follows the query buffer you enter in that tab. Scratchpad
+associations are persistent; ordinary file associations use their current
+buffer context. Folds and cached entries survive closing/reopening the sidebar.
+The Lua equivalent is `require("dbsh").panel("open")` (or `"close"` / `"toggle"`).
+
 ## Scratchpad
 
 <!--
@@ -1000,6 +1041,7 @@ The modules are small and single-purpose, which is what makes them testable:
 | `exec.lua` | asynchronous SQL/argv invocation, session slots, cancellation |
 | `results.lua` / `definitions.lua` | read-only result and DDL buffers |
 | `catalog.lua` / `backends/*.lua` | generic paged contract and backend catalog queries |
+| `panel.lua` / `panel_tree.lua` | tab-local sidebar and inventory built from cached/local state |
 | `scratch.lua` | named scratchpads and their metadata |
 | `safety.lua` | pure conservative SQL confirmation classifier |
 | `csv.lua` | table parsing and CSV serialization, pure functions |

@@ -168,6 +168,41 @@ function M.public(value)
 	return public(value)
 end
 
+function M.list()
+	local values = { public(state.fallback) }
+	for bufnr, value in pairs(state.buffers) do
+		if vim.api.nvim_buf_is_valid(bufnr) then
+			table.insert(values, public(value))
+		end
+	end
+	return values
+end
+
+-- Catalog requests carry only public data. Recover the private profile at the
+-- execution boundary and keep the source generation, even when browsing a
+-- different branch without changing the source buffer's selected context.
+function M.from_public(value)
+	if value == nil then
+		return M.snapshot(0)
+	end
+	local snapshot = M.snapshot(value.bufnr)
+	if snapshot.id ~= value.id or snapshot.generation ~= value.generation then
+		return nil, "catalog context changed"
+	end
+	local connection, err = config.connection(value.connection_name)
+	if connection == nil then
+		return nil, err
+	end
+	snapshot.connection_name = value.connection_name
+	snapshot.connection = connection
+	snapshot.backend_name = connection.type or "postgres"
+	snapshot.levels = vim.deepcopy(value.levels or {})
+	for _, key in ipairs(LEVEL_KEYS) do
+		snapshot.connection[key] = snapshot.levels[key]
+	end
+	return snapshot
+end
+
 function M.backend(value)
 	value = value or M.current(0)
 	if value == nil or value.connection == nil then

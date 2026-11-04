@@ -320,8 +320,14 @@ M.queries = {
 -- that cycle.
 local function fetch(sql, request, callback)
 	local exec = require("dbsh.exec")
+	local snapshot, err = require("dbsh.context").from_public(request.context)
+	if snapshot == nil then
+		callback(nil, err)
+		return
+	end
 	-- Its own slot, so opening a picker never cancels a running user query.
 	exec.run(sql, {
+		context = snapshot,
 		mode = "raw",
 		slot = "introspect",
 	}, function(code, stdout, stderr)
@@ -393,10 +399,10 @@ local function selected_value(item)
 	return item
 end
 
-local function select_relation(item)
+local function select_relation(item, snapshot)
 	item = selected_value(item)
 	local config = require("dbsh.config")
-	require("dbsh").query(M.preview_query(item, config.options().preview_limit))
+	require("dbsh").query(M.preview_query(item, config.options().preview_limit), snapshot)
 end
 
 function M.definition_unavailable()
