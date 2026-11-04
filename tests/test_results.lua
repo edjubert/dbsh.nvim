@@ -211,7 +211,21 @@ T["focuses the float again on a later query of the same session"] = function()
 	eq(vim.api.nvim_get_current_win(), win)
 end
 
-T["leaves the cursor in the query buffer when results open in a split"] = function()
+T["focuses the result split when a query starts"] = function()
+	local before = vim.api.nvim_get_current_win()
+	local buf = results.running(snapshots.a, "SELECT 1;", { split = "horizontal" })
+	eq(vim.api.nvim_get_current_win(), results.find_win(buf))
+	eq(vim.api.nvim_get_current_win() ~= before, true)
+end
+
+T["keeps the cursor in the query buffer when results_focus is false"] = function()
+	config.setup({
+		connections = {
+			local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },
+		},
+		default = "local_db",
+		results_focus = false,
+	})
 	local before = vim.api.nvim_get_current_win()
 	results.running(snapshots.a, "SELECT 1;", { split = "horizontal" })
 	eq(vim.api.nvim_get_current_win(), before)

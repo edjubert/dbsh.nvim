@@ -246,14 +246,18 @@ local function without_focus(opts)
 	return vim.tbl_extend("force", opts or {}, { focus = false })
 end
 
--- A split sits beside the SQL buffer and must not take the cursor: the point
--- of it is to keep typing. A float covers that buffer instead, and unfocused
--- it can neither be scrolled nor closed -- its q and <Esc> mappings never
--- fire. Only this door focuses: M.render runs from the CLI callback, long
--- after the user moved on, and an async focus steal is worse than none.
+-- A float covers the SQL buffer, and unfocused it can neither be scrolled
+-- nor closed -- its q and <Esc> mappings never fire, so it always takes the
+-- cursor. A split focuses the result window too by default (results_focus),
+-- so the running query is visible; set results_focus = false to keep typing
+-- in the SQL buffer. Only this door focuses: M.render runs from the CLI
+-- callback, long after the user moved on, and an async focus steal is worse
+-- than none.
 local function initial_focus(opts)
 	opts = opts or {}
-	return vim.tbl_extend("force", opts, { focus = opts.split == "float" })
+	return vim.tbl_extend("force", opts, {
+		focus = opts.split == "float" or config.options().results_focus == true,
+	})
 end
 
 -- In "tabs" mode each query appends a new section instead of overwriting the

@@ -206,6 +206,27 @@ T["falls back from an invalid result mode with a clear warning"] = function()
 	expect_match(notified, "results_mode")
 end
 
+T["focuses the result window by default"] = function()
+	eq(config.options().results_focus, true)
+end
+
+T["lets the user keep the cursor in the query buffer"] = function()
+	config.setup({ connections = {}, results_focus = false })
+	eq(config.options().results_focus, false)
+end
+
+T["falls back from a non-boolean results_focus with a clear warning"] = function()
+	local original_notify = vim.notify
+	local notified
+	vim.notify = function(message) notified = message end
+
+	config.setup({ connections = {}, results_focus = "yes" })
+
+	vim.notify = original_notify
+	eq(config.options().results_focus, true)
+	expect_match(notified, "results_focus")
+end
+
 T["configures the panel width and side"] = function()
 	eq(config.options().panel, { width = 40, position = "left" })
 	config.setup({ panel = { width = 48, position = "right" } })
