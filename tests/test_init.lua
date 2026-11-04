@@ -74,7 +74,7 @@ end
 
 T["declares every backend-agnostic command"] = function()
 	for _, name in ipairs({
-		"DbConnections", "DbTemp", "DbCancel", "DbToggleResults", "DbCSVView", "DbInfo",
+		"DbPanel", "DbConnections", "DbTemp", "DbCancel", "DbToggleResults", "DbCSVView", "DbInfo",
 		"DbObjects", "DbGlobalConnection", "DbForgetConnection",
 		"DbDefinitions", "DbToggleDefinition", "DbRefreshDefinition", "DbCloseDefinitions",
 	}) do

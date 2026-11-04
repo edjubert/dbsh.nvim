@@ -185,6 +185,17 @@ T["lets the user request a vertical result split"] = function()
 	eq(config.options().results_split, "vertical")
 end
 
+T["configures the panel width and side"] = function()
+	eq(config.options().panel, { width = 40, position = "left" })
+	config.setup({ panel = { width = 48, position = "right" } })
+	eq(config.options().panel, { width = 48, position = "right" })
+end
+
+T["falls back from invalid panel settings"] = function()
+	config.setup({ panel = { width = 0, position = "top" } })
+	eq(config.options().panel, { width = 40, position = "left" })
+end
+
 T["defaults to no variable pattern"] = function()
 	eq(config.options().variable_patterns, {})
 end

@@ -340,9 +340,9 @@ local function list_catalog(key, paginated)
 		local query, query_err = M.catalog_query(key, request)
 		if query == nil then callback(nil, query_err); return end
 		local context = require("dbsh.context")
-		local snapshot = context.snapshot(request.context.bufnr)
-		if snapshot.id ~= request.context.id or snapshot.generation ~= request.context.generation then
-			callback(nil, "Mongo catalog context changed")
+		local snapshot, snapshot_err = context.from_public(request.context)
+		if snapshot == nil then
+			callback(nil, snapshot_err)
 			return
 		end
 		require("dbsh.exec").run(query, {
