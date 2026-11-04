@@ -24,6 +24,7 @@ local defaults = {
 	export_dir = vim.fs.joinpath(vim.fn.stdpath("data"), "dbsh", "exports"),
 	results_split = "horizontal",
 	results_mode = "replace",
+	results_focus = true,
 	panel = { width = 40, position = "left" },
 	variable_patterns = {},
 	safety = { mode = "confirm" },
@@ -171,6 +172,10 @@ function M.setup(opts)
 	if M.state.opts.results_mode ~= "replace" and M.state.opts.results_mode ~= "tabs" then
 		warn("results_mode must be 'replace' or 'tabs'; using 'replace'")
 		M.state.opts.results_mode = defaults.results_mode
+	end
+	if type(M.state.opts.results_focus) ~= "boolean" then
+		warn("results_focus must be a boolean; using true")
+		M.state.opts.results_focus = defaults.results_focus
 	end
 end
 

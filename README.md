@@ -198,6 +198,7 @@ require("dbsh").setup({
 	export_dir = vim.fs.joinpath(vim.fn.stdpath("data"), "dbsh", "exports"),
 	results_split = "horizontal",
 	results_mode = "replace",
+	results_focus = true,
 	panel = { width = 40, position = "left" },
 	variable_patterns = {}, -- e.g. { ":(raw_data)" }, see SQL variables below
 	safety = { mode = "confirm" }, -- "confirm" or "off"
@@ -223,8 +224,9 @@ require("dbsh").setup({
 | `credentials.cache_ttl_ms` | `900000` | In-memory credential cache lifetime for password commands and AWS profiles, capped by AWS credential expiration. |
 | `csv_delimiter` | `","` | Column separator, for both CSV export and CSV yank. |
 | `export_dir` | `<stdpath("data")>/dbsh/exports` | Where `:DbExportCSV` suggests writing. |
-| `results_split` | `"horizontal"` | `"horizontal"`, `"vertical"` or `"float"`: which window opens `__DBSH__` in. Only applies the first time the window is created; combine with `vim.opt.splitright = true` for a right-hand split. `"float"` is styled after your telescope config, when installed, and takes the cursor when a query starts -- unfocused it could neither be scrolled nor closed; `q` or `<Esc>` closes it and hands the cursor back. A split never takes the cursor: the point of it is to keep typing. Output arriving never moves the cursor either way. |
+| `results_split` | `"horizontal"` | `"horizontal"`, `"vertical"` or `"float"`: which window opens `__DBSH__` in. Only applies the first time the window is created; combine with `vim.opt.splitright = true` for a right-hand split. `"float"` is styled after your telescope config, when installed, and takes the cursor when a query starts -- unfocused it could neither be scrolled nor closed; `q` or `<Esc>` closes it and hands the cursor back. A split also takes the cursor when a query starts, unless `results_focus = false`. Output arriving never moves the cursor either way. |
 | `results_mode` | `"replace"` | `"replace"` overwrites the result buffer on every query. `"tabs"` appends one folded section per query -- a `-- query #N · <connection> · <time>` header, the echoed query, then the output -- so the buffer keeps a working history. Each new query opens its own section and collapses the previous ones to their header; `za` / `zo` / `zc` fold them manually like any other fold. A query superseded by a newer one is marked `# Cancelled` in its section. Works with every `results_split`. |
+| `results_focus` | `true` | When `true`, a `"horizontal"`/`"vertical"` result split takes the cursor when a query starts, so the running query is visible. When `false`, the cursor stays in the query buffer and you switch to the result window yourself. A `"float"` always takes the cursor. Output arriving never moves the cursor either way. |
 | `panel` | `{ width = 40, position = "left" }` | Sidebar width in columns and side (`"left"` or `"right"`). Open it with `:DbPanel`; Telescope is optional. |
 | `variable_patterns` | `{}` | Lua patterns (one capture each) naming SQL variables to prompt for. See [SQL variables](#sql-variables). |
 | `safety` | `{ mode = "confirm" }` | Confirms mutating or ambiguous SQL. Use `{ mode = "off" }` to disable the ergonomic guardrail. |

@@ -112,12 +112,15 @@ T["folds every section and leaves only the newest one open"] = function()
 	eq(vim.api.nvim_win_get_cursor(win)[1], heads[2])
 end
 
-T["still opens the result window without stealing focus in a split"] = function()
-	local before = vim.api.nvim_get_current_win()
-	results.running(snapshot, "SELECT 1;", { split = "horizontal" })
-	eq(vim.api.nvim_get_current_win(), before)
+T["focuses the result split on a new query but not when output arrives"] = function()
+	local buf = results.running(snapshot, "SELECT 1;", { split = "horizontal" })
+	eq(vim.api.nvim_get_current_win(), results.find_win(buf))
+	local elsewhere = vim.tbl_filter(function(candidate)
+		return candidate ~= results.find_win(buf)
+	end, vim.api.nvim_list_wins())[1]
+	vim.api.nvim_set_current_win(elsewhere)
 	results.render(snapshot, "SELECT 1;", "one", { split = "horizontal" })
-	eq(vim.api.nvim_get_current_win(), before)
+	eq(vim.api.nvim_get_current_win(), elsewhere)
 end
 
 T["replace mode keeps overwriting the single section"] = function()
