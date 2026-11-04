@@ -185,6 +185,27 @@ T["lets the user request a vertical result split"] = function()
 	eq(config.options().results_split, "vertical")
 end
 
+T["defaults the result mode to replace"] = function()
+	eq(config.options().results_mode, "replace")
+end
+
+T["lets the user keep one tab per query in the result buffer"] = function()
+	config.setup({ connections = {}, results_mode = "tabs" })
+	eq(config.options().results_mode, "tabs")
+end
+
+T["falls back from an invalid result mode with a clear warning"] = function()
+	local original_notify = vim.notify
+	local notified
+	vim.notify = function(message) notified = message end
+
+	config.setup({ connections = {}, results_mode = "stack" })
+
+	vim.notify = original_notify
+	eq(config.options().results_mode, "replace")
+	expect_match(notified, "results_mode")
+end
+
 T["configures the panel width and side"] = function()
 	eq(config.options().panel, { width = 40, position = "left" })
 	config.setup({ panel = { width = 48, position = "right" } })

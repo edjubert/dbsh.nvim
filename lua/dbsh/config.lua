@@ -23,6 +23,7 @@ local defaults = {
 	csv_delimiter = ",",
 	export_dir = vim.fs.joinpath(vim.fn.stdpath("data"), "dbsh", "exports"),
 	results_split = "horizontal",
+	results_mode = "replace",
 	panel = { width = 40, position = "left" },
 	variable_patterns = {},
 	safety = { mode = "confirm" },
@@ -166,6 +167,10 @@ function M.setup(opts)
 		or (M.state.opts.safety.mode ~= "confirm" and M.state.opts.safety.mode ~= "off") then
 		warn("safety.mode must be 'confirm' or 'off'; using 'confirm'")
 		M.state.opts.safety = vim.deepcopy(defaults.safety)
+	end
+	if M.state.opts.results_mode ~= "replace" and M.state.opts.results_mode ~= "tabs" then
+		warn("results_mode must be 'replace' or 'tabs'; using 'replace'")
+		M.state.opts.results_mode = defaults.results_mode
 	end
 end
 

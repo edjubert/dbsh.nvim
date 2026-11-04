@@ -3,8 +3,15 @@
 local float = require("dbsh.float")
 local context = require("dbsh.context")
 local backends = require("dbsh.backends")
+local config = require("dbsh.config")
 
 local M = {}
+
+-- "replace" renders every query over the previous one; "tabs" appends one
+-- folded section per query so the buffer keeps a working history.
+local function tabs_mode()
+	return config.options().results_mode == "tabs"
+end
 
 local state = {
 	buffers = {},
@@ -137,6 +144,12 @@ function M.open(snapshot, opts)
 	vim.bo[buf].modifiable = false
 	vim.wo[win].wrap = false
 	vim.wo[win].sidescrolloff = 0
+	if tabs_mode() then
+		-- Each "-- query #N" header opens a level-1 fold: one section per query.
+		vim.wo[win].foldmethod = "expr"
+		vim.wo[win].foldexpr = "v:lua.require('dbsh.results').foldexpr(v:lnum)"
+		vim.wo[win].foldlevel = 0
+	end
 
 	-- An already-open window is never entered by the branches above, so an
 	-- explicit focus has to be honoured here or only the first query of a
@@ -179,8 +192,54 @@ local function set_lines(buf, lines)
 	vim.bo[buf].modifiable = false
 end
 
+local function set_lines_range(buf, start0, end0, lines)
+	vim.bo[buf].modifiable = true
+	vim.api.nvim_buf_set_lines(buf, start0, end0, true, lines)
+	vim.bo[buf].modifiable = false
+end
+
 local function split_lines(text)
 	return vim.split(text or "", "\n", { plain = true })
+end
+
+-- Fold expression for results_mode = "tabs": every section header opens a
+-- level-1 fold covering its query and output, down to the next header.
+function M.foldexpr(lnum)
+	if vim.fn.getline(lnum):match("^%-%- query #") then
+		return ">1"
+	end
+	return "="
+end
+
+local function tab_header(snapshot, n)
+	return string.format("-- query #%d · %s · %s", n, label(snapshot), os.date("%H:%M:%S"))
+end
+
+-- Appends lines at the end of the buffer and returns the 1-based line where
+-- they start. A fresh buffer holds a single empty line: replace it rather
+-- than leave a blank first line.
+local function append_lines(buf, lines)
+	local count = vim.api.nvim_buf_line_count(buf)
+	if count == 1 and vim.api.nvim_buf_get_lines(buf, 0, 1, true)[1] == "" then
+		set_lines(buf, lines)
+		return 1
+	end
+	set_lines_range(buf, count, -1, lines)
+	return count + 1
+end
+
+-- Opens the section's fold and scrolls it into view. zM first: only the
+-- newest tab stays expanded, the older ones collapse to their header line.
+local function reveal(buf, start)
+	local win = M.find_win(buf)
+	if win == nil then
+		return
+	end
+	vim.api.nvim_win_call(win, function()
+		vim.cmd("normal! zM")
+		vim.api.nvim_win_set_cursor(0, { start, 0 })
+		vim.cmd("normal! zv")
+	end)
 end
 
 local function without_focus(opts)
@@ -197,7 +256,69 @@ local function initial_focus(opts)
 	return vim.tbl_extend("force", opts, { focus = opts.split == "float" })
 end
 
+-- In "tabs" mode each query appends a new section instead of overwriting the
+-- buffer. The exec slot cancels a superseded query without firing its
+-- callback, so its placeholder is rewritten here, when the next one starts.
+local function running_tab(snapshot, query, opts)
+	local buf = M.open(snapshot, initial_focus(opts))
+	vim.b[buf].dbsh_result_query = query
+	local pending = vim.b[buf].dbsh_tab_running
+	if pending ~= nil then
+		local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, true)
+		if lines[#lines] == "# Running..." then
+			set_lines_range(buf, #lines - 1, #lines, { "# Cancelled" })
+		end
+		vim.b[buf].dbsh_tab_running = nil
+	end
+	local n = (vim.b[buf].dbsh_tab_count or 0) + 1
+	vim.b[buf].dbsh_tab_count = n
+	local lines = { tab_header(snapshot, n) }
+	vim.list_extend(lines, split_lines(query))
+	table.insert(lines, "")
+	table.insert(lines, "# Running...")
+	local start = append_lines(buf, lines)
+	vim.b[buf].dbsh_tab_running = start
+	reveal(buf, start)
+	vim.cmd("redraw")
+	return buf
+end
+
+local function render_tab(snapshot, query, output, opts)
+	local buf = M.open(snapshot, without_focus(opts))
+	vim.b[buf].dbsh_result_query = query
+	local start = vim.b[buf].dbsh_tab_running
+	if start == nil then
+		-- A render without a preceding running (direct call): append a whole
+		-- section straight away.
+		local n = (vim.b[buf].dbsh_tab_count or 0) + 1
+		vim.b[buf].dbsh_tab_count = n
+		local lines = { tab_header(snapshot, n) }
+		vim.list_extend(lines, split_lines(query))
+		table.insert(lines, "")
+		vim.list_extend(lines, split_lines(output))
+		reveal(buf, append_lines(buf, lines))
+		return buf
+	end
+	-- The pending section is always the last one: a newer query would have
+	-- cancelled this one's exec slot, and a cancelled callback never fires.
+	-- Replace only its placeholder line so later sections are never touched.
+	local section = vim.api.nvim_buf_get_lines(buf, start - 1, -1, true)
+	local idx = #section
+	while idx >= 1 and section[idx] ~= "# Running..." do
+		idx = idx - 1
+	end
+	if idx >= 1 then
+		set_lines_range(buf, start - 1 + idx - 1, start - 1 + idx, split_lines(output))
+	end
+	vim.b[buf].dbsh_tab_running = nil
+	reveal(buf, start)
+	return buf
+end
+
 function M.running(snapshot, query, opts)
+	if tabs_mode() then
+		return running_tab(snapshot, query, opts)
+	end
 	local buf = M.open(snapshot, initial_focus(opts))
 	vim.b[buf].dbsh_result_query = query
 	local lines = { "# Running..." }
@@ -209,6 +330,9 @@ function M.running(snapshot, query, opts)
 end
 
 function M.render(snapshot, query, output, opts)
+	if tabs_mode() then
+		return render_tab(snapshot, query, output, opts)
+	end
 	local buf = M.open(snapshot, without_focus(opts))
 	vim.b[buf].dbsh_result_query = query
 	local lines = split_lines(query)
