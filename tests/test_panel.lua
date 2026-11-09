@@ -9,7 +9,7 @@ local scratch = require("dbsh.scratch")
 local postgres = require("dbsh.backends.postgres")
 local exec = require("dbsh.exec")
 
-local root, source_buf, original_dir, original_runner, before_bufs
+local root, source_buf, original_dir, original_runner, original_notify, before_bufs
 local calls
 
 local function cached(definition, items, options, snapshot, cursor)
@@ -26,6 +26,13 @@ local function find_node(nodes, kind, label)
 	error("missing " .. kind .. " " .. tostring(label))
 end
 
+local function uncache(kind, label)
+	local _, nodes = tree.build(context.snapshot(source_buf))
+	local node = find_node(nodes, kind, label)
+	vim.fn.delete(catalog.path(catalog.cache_key(node.snapshot, node.request, { scope = node.scope })))
+	catalog.setup()
+end
+
 local function choose(session, kind, label)
 	panel.action("expand_all")
 	for row, node in pairs(session.entries) do
@@ -40,6 +47,7 @@ end
 local T = MiniTest.new_set({
 	hooks = {
 		pre_case = function()
+			catalog.clear()
 			vim.cmd("silent! tabonly")
 			vim.cmd("silent! only")
 			before_bufs = {}
@@ -72,15 +80,33 @@ local T = MiniTest.new_set({
 			original_dir = scratch._data_dir
 			scratch._data_dir = function() return vim.fs.joinpath(root, "scratchpads") end
 			original_runner = exec.runner
+			original_notify = vim.notify
 			calls = {}
 			exec.runner = function(argv, opts, callback)
 				table.insert(calls, { argv = argv, opts = opts, callback = callback })
 				return { kill = function() end }
 			end
+			-- Start with a quiet, fully cached inventory. Individual loading
+			-- tests remove only the pages they need to exercise.
+			local _, nodes = tree.build(context.snapshot(source_buf))
+			for _, node in pairs(nodes) do
+				if node.branch and node.request ~= nil and node.error == nil then
+					local items = {}
+					if node.request.apply ~= nil then
+						for _, child in ipairs(node.children) do
+							if child.kind == "database" or child.kind == "schema" then
+								table.insert(items, { value = child.label })
+							end
+						end
+					end
+					cached(node.request, items, { scope = node.scope }, node.snapshot)
+				end
+			end
 		end,
 		post_case = function()
 			panel.setup()
 			exec.runner, exec.slots = original_runner, {}
+			vim.notify = original_notify
 			scratch._data_dir = original_dir
 			vim.cmd("silent! tabonly")
 			vim.cmd("silent! only")
@@ -95,7 +121,7 @@ local T = MiniTest.new_set({
 	},
 })
 
-T["opens a read-only tree and expands only cached state without running a CLI"] = function()
+T["opens and redraws a fully cached tree without running a CLI"] = function()
 	local before = context.snapshot(source_buf)
 	local session = panel.open()
 	panel.action("expand_all")
@@ -128,7 +154,111 @@ T["merges cached tables and relations across schemas without duplication"] = fun
 	eq(#calls, 0)
 end
 
+T["automatically loads tables for the schema already expanded when the panel opens"] = function()
+	uncache("schema", "public")
+	local before = context.snapshot(source_buf)
+	local session = panel.open()
+	eq(session.closed[find_node(session.nodes, "schema", "public").id], false)
+	eq(vim.wait(1000, function() return #calls == 1 end, 10), true)
+	local script = table.concat(vim.fn.readfile(calls[1].argv[#calls[1].argv]), "\n")
+	eq(script:find("n.nspname = E'public'", 1, true) ~= nil, true)
+	calls[1].callback({ code = 0, stdout = "public\tusers\tr\t1\n", stderr = "" })
+	eq(vim.wait(1000, function() return session.loading == nil end, 10), true)
+	find_node(session.nodes, "table", "users [table]")
+	eq(context.snapshot(source_buf), before)
+	eq(#calls, 1)
+end
+
+T["an empty cache loads selected tables first and leaves undisplayed inventories folded"] = function()
+	catalog.clear()
+	local before = context.snapshot(source_buf)
+	local session = panel.open()
+	eq(vim.wait(1000, function() return #calls == 1 end, 10), true)
+	local script = table.concat(vim.fn.readfile(calls[1].argv[#calls[1].argv]), "\n")
+	eq(script:find("n.nspname = E'public'", 1, true) ~= nil, true)
+	calls[1].callback({ code = 0, stdout = "public\tusers\tr\t1\n", stderr = "" })
+	eq(vim.wait(1000, function() return #calls == 2 end, 10), true)
+	calls[2].callback({ code = 0, stdout = "analytics\npublic\n", stderr = "" })
+	eq(vim.wait(1000, function() return #calls == 3 end, 10), true)
+	calls[3].callback({ code = 0, stdout = "app\narchive\n", stderr = "" })
+	eq(vim.wait(1000, function() return session.loading == nil end, 10), true)
+	find_node(session.nodes, "table", "users [table]")
+	eq(session.closed[find_node(session.nodes, "schema", "analytics").id], true)
+	eq(session.closed[find_node(session.nodes, "database", "archive").id], true)
+	eq(session.closed[find_node(session.nodes, "connection", "staging").id], true)
+	eq(context.snapshot(source_buf), before)
+	eq(#calls, 3)
+end
+
+T["bulk expansion loads tables for schemas seeded by scratchpad metadata"] = function()
+	assert(scratch.create({
+		id = "dashboard", name = "Dashboard", backend = "postgres", connection_name = "local_db",
+		levels = { database = "finance", schema = "dashboard" },
+	}))
+	local before = context.snapshot(source_buf)
+	local session = panel.open()
+	panel.action("expand_all")
+	eq(vim.wait(1000, function() return #calls == 1 end, 10), true)
+	local argv = calls[1].argv
+	eq(argv[vim.fn.index(argv, "-d") + 2], "finance")
+	local script = table.concat(vim.fn.readfile(argv[#argv]), "\n")
+	eq(script:find("n.nspname = E'dashboard'", 1, true) ~= nil, true)
+	calls[1].callback({ code = 0, stdout = "dashboard\torders\tr\t1\n", stderr = "" })
+	eq(vim.wait(1000, function() return #calls == 2 end, 10), true)
+	calls[2].callback({ code = 0, stdout = "dashboard\n", stderr = "" })
+	eq(vim.wait(1000, function() return session.loading == nil end, 10), true)
+	find_node(session.nodes, "table", "orders [table]")
+	eq(context.snapshot(source_buf), before)
+	eq(#calls, 2)
+end
+
+T["automatically loads a newly expanded schema after a source context change without stealing focus"] = function()
+	local session = panel.open()
+	vim.api.nvim_set_current_win(session.source_win)
+	context.set_level(source_buf, "schema", "tenant")
+	eq(vim.wait(1000, function() return #calls == 1 end, 10), true)
+	local script = table.concat(vim.fn.readfile(calls[1].argv[#calls[1].argv]), "\n")
+	eq(script:find("n.nspname = E'tenant'", 1, true) ~= nil, true)
+	calls[1].callback({ code = 0, stdout = "tenant\tusers\tr\t1\n", stderr = "" })
+	eq(vim.wait(1000, function() return session.loading == nil end, 10), true)
+	eq(vim.api.nvim_get_current_win(), session.source_win)
+	eq(find_node(session.nodes, "table", "users [table]").snapshot.levels.schema, "tenant")
+	eq(#calls, 1)
+end
+
+T["failed automatic loads wait for an explicit retry instead of looping on redraw"] = function()
+	uncache("schema", "public")
+	vim.notify = function() end
+	local session = panel.open()
+	eq(vim.wait(1000, function() return #calls == 1 end, 10), true)
+	calls[1].callback({ code = 1, stdout = "", stderr = "offline" })
+	eq(vim.wait(1000, function() return session.loading == nil end, 10), true)
+	panel.render(session)
+	vim.wait(50)
+	eq(#calls, 1)
+	choose(session, "schema", "public")
+	panel.action("left")
+	panel.action("open")
+	eq(#calls, 2)
+	calls[2].callback({ code = 0, stdout = "", stderr = "" })
+	eq(vim.wait(1000, function() return session.loading == nil end, 10), true)
+	eq(#calls, 2)
+end
+
+T["collapsing an ancestor skips automatic loads queued for its hidden descendants"] = function()
+	uncache("database", "app")
+	uncache("schema", "public")
+	local session = panel.open()
+	eq(vim.wait(1000, function() return #calls == 1 end, 10), true)
+	choose(session, "connection", "local_db")
+	panel.action("left")
+	calls[1].callback({ code = 0, stdout = "public\tusers\tr\t1\n", stderr = "" })
+	eq(vim.wait(1000, function() return session.loading == nil end, 10), true)
+	eq(#calls, 1)
+end
+
 T["keeps filtered and incomplete inventories visibly loadable"] = function()
+	uncache("database", "app")
 	cached(postgres.contexts[2], { { value = "filtered" } }, { query = "filter" })
 	local _, nodes = tree.build(context.snapshot(source_buf))
 	local db = find_node(nodes, "database", "app")
@@ -191,6 +321,173 @@ T["fetches just the selected branch using its captured profile without changing 
 	eq(context.snapshot(source_buf), before)
 	eq(find_node(session.nodes, "schema", "tenant").snapshot.connection_name, "staging")
 	eq(#calls, 1)
+end
+
+for _, action in ipairs({ "open", "right" }) do
+	T[action .. " automatically loads an uncached database without changing the source"] = function()
+		uncache("database", "stage")
+		local before = context.snapshot(source_buf)
+		local session = panel.open()
+		local node = choose(session, "database", "stage")
+		panel.action("left")
+		panel.action(action)
+		eq(session.closed[node.id], false)
+		eq(#calls, 1)
+		local argv = calls[1].argv
+		eq(argv[vim.fn.index(argv, "-d") + 2], "stage")
+		eq(argv[vim.fn.index(argv, "-h") + 2], "other")
+		calls[1].callback({ code = 0, stdout = "tenant\n", stderr = "" })
+		eq(vim.wait(1000, function() return session.loading == nil end, 10), true)
+		eq(context.snapshot(source_buf), before)
+		eq(find_node(session.nodes, "schema", "tenant").snapshot.connection_name, "staging")
+		eq(#calls, 1)
+		panel.action("left")
+		panel.action(action)
+		eq(#calls, 1)
+	end
+end
+
+T["automatically loads the databases when a connection is expanded"] = function()
+	uncache("connection", "staging")
+	local session = panel.open()
+	local node = choose(session, "connection", "staging")
+	panel.action("left")
+	panel.action("open")
+	eq(#calls, 1)
+	calls[1].callback({ code = 0, stdout = "archive\n", stderr = "" })
+	eq(vim.wait(1000, function() return session.loading == nil end, 10), true)
+	eq(find_node(session.nodes, "database", "archive").parent, node.id)
+	eq(#calls, 1)
+end
+
+T["automatically loads only the first schema page and reuses it when reopened"] = function()
+	uncache("schema", "public")
+	local before = context.snapshot(source_buf)
+	local session = panel.open()
+	local node = choose(session, "schema", "public")
+	panel.action("left")
+	panel.action("open")
+	eq(#calls, 1)
+	local script = table.concat(vim.fn.readfile(calls[1].argv[#calls[1].argv]), "\n")
+	eq(script:find("n.nspname = E'public'", 1, true) ~= nil, true)
+	calls[1].callback({
+		code = 0, stdout = "public\ta\tr\t1\npublic\tb\tr\t2\npublic\tc\tr\t3\n", stderr = "",
+	})
+	eq(vim.wait(1000, function() return session.loading == nil end, 10), true)
+	eq(context.snapshot(source_buf), before)
+	eq(find_node(session.nodes, "table", "a [table]").parent, node.id)
+	eq(find_node(session.nodes, "table", "b [table]").parent, node.id)
+	eq(find_node(session.nodes, "more", "Load more…").parent, node.id)
+	panel.action("left")
+	panel.action("open")
+	eq(#calls, 1)
+	panel.close()
+	panel.open()
+	eq(#calls, 1)
+	panel.action("fetch")
+	eq(#calls, 2)
+end
+
+T["right loads an uncached branch that is already expanded"] = function()
+	uncache("schema", "public")
+	local session = panel.open()
+	choose(session, "schema", "public")
+	panel.action("right")
+	eq(#calls, 1)
+	panel.action("right")
+	eq(#calls, 1)
+	calls[1].callback({ code = 0, stdout = "", stderr = "" })
+	eq(vim.wait(1000, function() return session.loading == nil end, 10), true)
+	panel.action("left")
+	panel.action("open")
+	eq(#calls, 1)
+end
+
+T["queues other expanded branches while a catalog is loading"] = function()
+	uncache("database", "app")
+	uncache("schema", "public")
+	local session = panel.open()
+	choose(session, "database", "app")
+	panel.action("left")
+	panel.action("open")
+	eq(#calls, 1)
+	choose(session, "schema", "public")
+	panel.action("left")
+	panel.action("open")
+	panel.action("right")
+	eq(#calls, 1)
+	calls[1].callback({ code = 0, stdout = "public\n", stderr = "" })
+	eq(vim.wait(1000, function() return #calls == 2 end, 10), true)
+	calls[2].callback({ code = 0, stdout = "public\tusers\tr\t1\n", stderr = "" })
+	eq(vim.wait(1000, function() return session.loading == nil end, 10), true)
+	find_node(session.nodes, "table", "users [table]")
+	eq(#calls, 2)
+end
+
+T["skips queued branches collapsed before their turn"] = function()
+	uncache("schema", "public")
+	local session = panel.open()
+	choose(session, "database", "app")
+	panel.action("fetch")
+	choose(session, "schema", "public")
+	panel.action("left")
+	panel.action("open")
+	panel.action("left")
+	calls[1].callback({ code = 0, stdout = "public\n", stderr = "" })
+	eq(vim.wait(1000, function() return session.loading == nil end, 10), true)
+	eq(#calls, 1)
+end
+
+T["loads an unfiltered first page when only filtered schema entries are cached"] = function()
+	uncache("schema", "public")
+	cached(postgres.catalogs[1], {
+		{ value = { name = "users", schema = "public", oid = "1", relkind = "r" } },
+	}, { scope = { schema = "public", all_schemas = false }, query = "users" })
+	local session = panel.open()
+	choose(session, "schema", "public")
+	panel.action("left")
+	panel.action("open")
+	eq(#calls, 1)
+end
+
+T["reloads queued branches using the new source when the panel follows another query buffer"] = function()
+	uncache("schema", "public")
+	local session = panel.open()
+	choose(session, "database", "app")
+	panel.action("fetch")
+	choose(session, "schema", "public")
+	panel.action("left")
+	panel.action("open")
+	local other = vim.api.nvim_create_buf(true, false)
+	context.bind(other, "local_db")
+	vim.api.nvim_set_current_win(session.source_win)
+	vim.api.nvim_set_current_buf(other)
+	calls[1].callback({ code = 0, stdout = "public\n", stderr = "" })
+	eq(vim.wait(1000, function() return #calls == 2 end, 10), true)
+	calls[2].callback({ code = 0, stdout = "", stderr = "" })
+	eq(vim.wait(1000, function() return session.loading == nil end, 10), true)
+	eq(#calls, 2)
+	eq(session.source_buf, other)
+	eq(session.pending, {})
+end
+
+T["resumes loading expanded branches when the sidebar is reopened"] = function()
+	uncache("schema", "public")
+	local session = panel.open()
+	choose(session, "database", "app")
+	panel.action("fetch")
+	choose(session, "schema", "public")
+	panel.action("left")
+	panel.action("open")
+	panel.close()
+	calls[1].callback({ code = 0, stdout = "public\n", stderr = "" })
+	eq(vim.wait(1000, function() return session.loading == nil end, 10), true)
+	panel.open()
+	eq(vim.wait(1000, function() return #calls == 2 end, 10), true)
+	calls[2].callback({ code = 0, stdout = "", stderr = "" })
+	eq(vim.wait(1000, function() return session.loading == nil end, 10), true)
+	eq(#calls, 2)
+	eq(session.pending, {})
 end
 
 T["loads the next page only when its load-more row is activated"] = function()
@@ -354,15 +651,24 @@ T["refuses global query-reading mappings in the panel"] = function()
 end
 
 T["cancels a pending catalog when its owning source context changes"] = function()
+	uncache("schema", "public")
+	local before = catalog.entries()
 	local session = panel.open()
 	choose(session, "database", "app")
 	panel.action("fetch")
 	eq(session.loading ~= nil, true)
+	choose(session, "schema", "public")
+	panel.action("left")
+	panel.action("open")
+	eq(#session.pending, 1)
 	context.set_level(source_buf, "database", "changed")
 	eq(session.loading, nil)
+	eq(session.pending, {})
+	panel.action("collapse_all")
 	calls[1].callback({ code = 0, stdout = "stale\n", stderr = "" })
 	vim.wait(50)
-	eq(catalog.entries(), {})
+	eq(catalog.entries(), before)
+	eq(#calls, 1)
 end
 
 return T

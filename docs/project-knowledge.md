@@ -183,15 +183,28 @@ cache entries. MongoDB collections live directly under their databases.
 The scratchpad/file section groups persistent scratchpads and open query files
 by connection; internal result and definition buffers are excluded.
 
-`catalog.lua` caches successful validated pages in memory, with keys scoped by
+`catalog.lua` caches successful validated pages in memory and on disk, with keys scoped by
 public profile identity, effective levels, catalog/selector, schema scope,
 literal filter, relation and page size. A matching next-page cursor appends;
 a first-page refresh replaces that inventory. Partial and filtered fragments
-remain distinguishable. `setup()` clears the cache, and stale generations or
-older callbacks cannot repopulate it. Cache entries contain only public data.
+remain distinguishable. Each successful page atomically replaces its own
+versioned JSON file under `stdpath("data")/dbsh/catalog/`, named by the hash of
+its cache key. `setup()` restores matching configured profiles and rejects
+corrupt, incompatible or inconsistent entries. Stored contexts contain only
+the connection name, backend and levels, with no session ID, buffer number or
+generation. `catalog.clear()` removes both memory and disk entries. Runtime
+resets still invalidate pending requests, so stale generations or older
+callbacks cannot repopulate either cache. Cache entries contain only public data.
 
-Rendering and folding never call a backend. `r` and explicit load rows fetch
-one branch/page using a public captured context. `context.from_public`
+Rendering builds the view from local state, then schedules the uncached first
+pages of visible, expanded branches. This includes initially selected contexts,
+restored folds and bulk expansion (`zR`), with schemas queued before their
+ancestors so visible tables arrive first. Loaded branches reuse their cache.
+Failed automatic requests are remembered per source generation and catalog
+identity until explicitly retried, preventing redraw loops. `r` and explicit
+load rows fetch one branch/page using a public captured context.
+Branches opened during another sidebar request are queued, with hidden,
+collapsed or stale branches skipped before loading. `context.from_public`
 reconstructs the private execution profile at the backend boundary and checks
 the source generation; PostgreSQL, Snowflake and MongoDB catalog runners use
 it instead of reading the focused sidebar buffer. Browsing a branch does not
@@ -218,7 +231,7 @@ navigation.
 
 ## Persistence
 
-CSV exports, variable history, and scratchpad metadata and files live under
+Catalog pages, CSV exports, variable history, and scratchpad metadata and files live under
 `stdpath("data")/dbsh/`. Always create the parent directory with
 `vim.fn.mkdir(dir, "p")` before writing. Secrets are never copied to this
 persistent storage.

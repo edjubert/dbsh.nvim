@@ -14,6 +14,7 @@ local original_credentials_runner
 local T = MiniTest.new_set({
 	hooks = {
 		pre_case = function()
+			require("dbsh.catalog").clear()
 			dbsh.setup({
 				connections = {
 					local_db = { host = "localhost", port = 5432, database = "postgres", username = "dev" },

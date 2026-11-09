@@ -481,7 +481,7 @@ end
 function M.setup(opts)
 	config.setup(opts)
 	context.setup()
-	catalog.clear()
+	catalog.setup()
 	panel.setup()
 	lsp.setup()
 	last_queries = {}

@@ -1,4 +1,4 @@
--- Generic catalog request construction and backend response validation.
+-- Generic catalog requests, response validation, and persistent public pages.
 
 local config = require("dbsh.config")
 local context = require("dbsh.context")
@@ -6,6 +6,59 @@ local context = require("dbsh.context")
 local M = {}
 
 local cache, revisions, epoch = {}, {}, 0
+local STORE_VERSION = 1
+local LEVEL_KEYS = { "database", "schema", "role", "warehouse" }
+
+function M.dir()
+	return vim.fs.joinpath(vim.fn.stdpath("data"), "dbsh", "catalog")
+end
+
+function M.path(key)
+	return vim.fs.joinpath(M.dir(), vim.fn.sha256(key) .. ".json")
+end
+
+function M._rename(from, to)
+	return os.rename(from, to)
+end
+
+local function reset()
+	cache, revisions, epoch = {}, {}, epoch + 1
+end
+
+local function public_entry(entry)
+	local copy = {
+		context = {
+			connection_name = entry.context.connection_name,
+			backend = entry.context.backend,
+			levels = {},
+		},
+	}
+	for _, key in ipairs(LEVEL_KEYS) do
+		copy.context.levels[key] = entry.context.levels[key]
+	end
+	for _, key in ipairs({
+		"key", "profile", "catalog", "selector", "scope", "query",
+		"relation", "limit", "items", "next_cursor", "partial",
+	}) do
+		copy[key] = vim.deepcopy(entry[key])
+	end
+	return copy
+end
+
+local function persist(entry)
+	local path = M.path(entry.key)
+	local temporary = path .. ".tmp-" .. vim.uv.os_getpid() .. "-" .. vim.uv.hrtime()
+	local ok, saved = pcall(function()
+		local encoded = vim.json.encode({ version = STORE_VERSION, entry = public_entry(entry) })
+		vim.fn.mkdir(M.dir(), "p")
+		if vim.fn.writefile({ encoded }, temporary) ~= 0 then return false end
+		return M._rename(temporary, path)
+	end)
+	if not ok or not saved then
+		pcall(vim.fn.delete, temporary)
+		vim.notify("dbsh.nvim: could not persist catalog cache", vim.log.levels.WARN)
+	end
+end
 
 local function stable(value)
 	if type(value) ~= "table" then
@@ -54,6 +107,52 @@ function M.cache_key(snapshot, definition, options)
 	}))
 end
 
+local function restore(store)
+	local entry = type(store) == "table" and store.version == STORE_VERSION and store.entry
+	if type(entry) ~= "table" or type(entry.key) ~= "string" or type(entry.profile) ~= "string"
+		or type(entry.catalog) ~= "string" or type(entry.selector) ~= "boolean"
+		or type(entry.context) ~= "table" or type(entry.context.connection_name) ~= "string"
+		or type(entry.context.levels) ~= "table" or type(entry.scope) ~= "table"
+		or type(entry.query) ~= "string" or type(entry.partial) ~= "boolean"
+		or type(entry.limit) ~= "number" or entry.limit <= 0 or entry.limit == math.huge
+		or entry.limit ~= math.floor(entry.limit) or type(entry.items) ~= "table"
+		or not vim.islist(entry.items) or (entry.next_cursor ~= nil and type(entry.next_cursor) ~= "string")
+		or (entry.relation ~= nil and type(entry.relation) ~= "table") then return end
+	for _, key in ipairs(LEVEL_KEYS) do
+		if entry.context.levels[key] ~= nil and type(entry.context.levels[key]) ~= "string" then return end
+	end
+	if (entry.scope.schema ~= nil and type(entry.scope.schema) ~= "string")
+		or (entry.scope.all_schemas ~= nil and type(entry.scope.all_schemas) ~= "boolean") then return end
+	for _, item in ipairs(entry.items) do
+		if type(item) ~= "table" then return end
+	end
+	local connection = config.connection(entry.context.connection_name)
+	if connection == nil then return end
+	local snapshot = {
+		connection_name = entry.context.connection_name, connection = connection,
+		backend_name = connection.type or "postgres", levels = entry.context.levels,
+	}
+	if entry.context.backend ~= snapshot.backend_name or entry.profile ~= fingerprint(snapshot)
+		or entry.key ~= M.cache_key(snapshot, { key = entry.catalog, apply = entry.selector and true or nil }, {
+			scope = entry.scope, query = entry.query, relation = entry.relation, limit = entry.limit,
+		}) then return end
+	return public_entry(entry)
+end
+
+function M.setup()
+	reset()
+	-- Each key has its own file, so separate Neovim sessions do not overwrite
+	-- unrelated pages. Restored entries have no previous buffer/session identity.
+	local ok, paths = pcall(vim.fn.globpath, M.dir(), "*.json", false, true)
+	if not ok then return end
+	for _, path in ipairs(paths) do
+		local read_ok, entry = pcall(function()
+			return restore(vim.json.decode(table.concat(vim.fn.readfile(path), "\n")))
+		end)
+		if read_ok and entry ~= nil and path == M.path(entry.key) then cache[entry.key] = entry end
+	end
+end
+
 function M.cached(snapshot, definition, options)
 	return vim.deepcopy(cache[M.cache_key(snapshot, definition, options)])
 end
@@ -70,7 +169,13 @@ function M.entries(snapshot)
 end
 
 function M.clear()
-	cache, revisions, epoch = {}, {}, epoch + 1
+	reset()
+	if vim.fn.isdirectory(M.dir()) == 1 then
+		local ok, status = pcall(vim.fn.delete, M.dir(), "rf")
+		if not ok or status ~= 0 then
+			vim.notify("dbsh.nvim: could not clear catalog cache", vim.log.levels.WARN)
+		end
+	end
 end
 
 local function malformed(detail)
@@ -147,6 +252,7 @@ function M.request(snapshot, definition, options, callback)
 				next_cursor = page.next_cursor,
 				partial = partial,
 			}
+			persist(cache[key])
 			vim.api.nvim_exec_autocmds("User", {
 				pattern = "DbshCatalogChanged",
 				modeline = false,

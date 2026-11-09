@@ -1,4 +1,4 @@
--- Builds an inventory from local state only. Expanding a node never calls a CLI.
+-- Builds an inventory from local state only. Branch loading belongs to the panel.
 
 local config = require("dbsh.config")
 local context = require("dbsh.context")

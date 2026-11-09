@@ -762,26 +762,36 @@ contain collections directly. A **Scratchpads / files** section groups saved
 scratchpads and open query files by connection. Reopening a scratchpad keeps
 its unsaved buffer contents.
 
-Opening, folding and expanding the tree perform no database requests. The
-inventory combines configured contexts, buffer and scratchpad contexts, and
-catalog pages already loaded by the sidebar or existing pickers. Catalog data
-is cached in memory for the Neovim session and reset by `setup()`. A filtered
-or partial page supplies known objects without implying a complete inventory.
+Opening the sidebar displays configured contexts, buffer and scratchpad
+contexts, and catalog pages already loaded by the sidebar or existing pickers.
+Every visible, expanded connection, database or schema automatically loads its
+uncached first page, including the selected context when the panel opens and
+branches expanded with `zR`. Reopening a loaded branch reuses its cached pages;
+`r` explicitly refreshes them. Catalog pages are saved automatically under
+`<stdpath("data")>/dbsh/catalog/` and restored by `setup()`, so they survive
+Neovim restarts. The store includes public catalog metadata, scopes, filters
+and pagination cursors; credentials and buffer/session identities are excluded.
+A filtered or partial page supplies known objects without implying a complete
+inventory. Missing, corrupted or incompatible cache files are ignored.
 
 | Key | Action |
 |---|---|
-| `<CR>`, `o` | toggle a branch, open a scratchpad/file, or preview a table |
+| `<CR>`, `o` | toggle a branch and load its uncached first page, open a scratchpad/file, or preview a table |
 | `h`, `<Left>` | collapse a branch or move to its parent |
-| `l`, `<Right>` | expand a branch or move to its first child; open a leaf |
+| `l`, `<Right>` | expand/load a branch or move to its first child; open a leaf |
 | `s` | select the connection/database/schema for the query buffer beside the panel |
 | `r` | fetch or refresh the selected branch's first catalog page |
 | `<CR>` on **Load… / Load more…** | explicitly fetch that page |
-| `g` | rebuild the display from local state |
-| `zR`, `zM` | expand/collapse every known branch |
+| `g` | rebuild the display and load missing pages for visible, expanded branches |
+| `zR`, `zM` | expand/collapse every known branch; expanded branches load uncached first pages |
 | `q` | close the sidebar |
 
-Fetching a branch reads only its own catalog, without recursively fetching its
-children or remaining pages. A fetch uses the branch's captured context and
+Each fetch reads only one branch's first page. Collapsed children and remaining
+pages are not fetched automatically. Open branches wait their turn, with tables
+of an expanded schema loaded before its ancestors' inventories.
+Branches hidden or collapsed before their turn are skipped. Failed automatic
+fetches wait for `r` or another explicit expansion rather than retrying on redraw.
+A fetch uses the branch's captured context and
 leaves the query buffer's selected connection unchanged. Selecting a database
 with `s` clears its previous schema. Selecting or previewing an object affects
 the source buffer; the panel never becomes a query context.
@@ -789,6 +799,9 @@ the source buffer; the panel never becomes a query context.
 The sidebar follows the query buffer you enter in that tab. Scratchpad
 associations are persistent; ordinary file associations use their current
 buffer context. Folds and cached entries survive closing/reopening the sidebar.
+To clear both the in-memory and persisted catalog cache, call
+`require("dbsh.catalog").clear()` and redraw with `g` to load fresh data for
+visible, expanded branches.
 The Lua equivalent is `require("dbsh").panel("open")` (or `"close"` / `"toggle"`).
 
 ## Scratchpad

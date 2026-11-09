@@ -42,4 +42,12 @@ end
 vim.opt.runtimepath:append(mini_dir)
 vim.opt.runtimepath:append(vim.fn.getcwd())
 
+-- Catalog requests persist their pages. Test and smoke runs must never read or
+-- overwrite the user's catalog cache.
+local catalog_dir = vim.fn.tempname()
+require("dbsh.catalog").dir = function() return catalog_dir end
+vim.api.nvim_create_autocmd("VimLeavePre", {
+	callback = function() vim.fn.delete(catalog_dir, "rf") end,
+})
+
 require("mini.test").setup()

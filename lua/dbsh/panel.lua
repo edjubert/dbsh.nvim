@@ -1,5 +1,5 @@
--- Tab-local sidebar. Rendering and tree navigation only read local state;
--- loading a catalog page is a separate, explicit action.
+-- Tab-local sidebar. Rendering reads local state; opening an uncached branch
+-- loads its first catalog page without changing the source context.
 
 local config = require("dbsh.config")
 local context = require("dbsh.context")
@@ -10,6 +10,7 @@ local M = {}
 local sessions = {}
 local namespace = vim.api.nvim_create_namespace("dbsh.panel")
 local queued = false
+local load_open
 
 local function notify(err)
 	vim.notify("dbsh.nvim: " .. tostring(err), vim.log.levels.WARN)
@@ -81,6 +82,7 @@ function M.render(session)
 	local lines = { "dbsh", "Enter open · h/l fold · s select", "r fetch · g refresh · q close", "" }
 	local highlights = { { 1, "Title" }, { 2, "Comment" }, { 3, "Comment" } }
 	session.entries = {}
+	session.visible, session.open_branches = {}, {}
 	local function visit(node, depth)
 		if node.branch and session.closed[node.id] == nil then
 			session.closed[node.id] = node.kind ~= "section" and node.kind ~= "group" and not selected(node, snapshot)
@@ -90,12 +92,16 @@ function M.render(session)
 		local label = node.label:gsub("%c", " ")
 		table.insert(lines, string.rep("  ", depth) .. marker .. label .. (active and " ◀" or ""))
 		session.entries[#lines] = node
+		session.visible[node.id] = true
 		local group = node.error and "DiagnosticWarn" or active and "Special"
 			or node.branch and "Directory" or (node.kind == "load" or node.kind == "more" or node.kind == "new") and "MoreMsg"
 			or node.kind == "empty" and "Comment" or "Normal"
 		table.insert(highlights, { #lines, group })
 		if node.branch and not session.closed[node.id] then
 			for _, child in ipairs(node.children) do visit(child, depth + 1) end
+			-- Prefer the visible leaf's contents before loading its ancestors'
+			-- inventories, so an already expanded schema gets its tables first.
+			table.insert(session.open_branches, node)
 		end
 	end
 	for _, root in ipairs(session.roots) do visit(root, 0) end
@@ -114,6 +120,13 @@ function M.render(session)
 		})
 	end
 	if anchor ~= nil then focus_entry(session, anchor.id) end
+	if not session.autoload_queued then
+		session.autoload_queued = true
+		vim.schedule(function()
+			session.autoload_queued = false
+			if sessions[session.tab] == session and valid_win(session.win) then load_open(session) end
+		end)
+	end
 end
 
 local function refresh()
@@ -176,6 +189,15 @@ local function apply(session, node)
 	return context.snapshot(bufnr)
 end
 
+local load_pending
+
+local function request_identity(node)
+	return vim.json.encode({
+		node.snapshot.id, node.snapshot.generation,
+		catalog.cache_key(node.snapshot, node.request, node.options or { scope = node.scope }),
+	})
+end
+
 local function load(session, node)
 	if node.request == nil or node.snapshot == nil then return end
 	if session.loading ~= nil then return notify("a catalog page is already loading") end
@@ -183,15 +205,59 @@ local function load(session, node)
 		M.render(session)
 		return notify("source context changed; select the branch again")
 	end
-	local token = { title = node.request.title, snapshot = node.snapshot }
+	local token = {
+		id = node.branch and node.id or node.parent,
+		title = node.request.title, snapshot = node.snapshot,
+		identity = request_identity(node),
+	}
 	session.loading = token
 	M.render(session)
 	catalog.request(node.snapshot, node.request, node.options or { scope = node.scope }, function(_, err)
 		if session.loading ~= token then return end
 		session.loading = nil
+		session.failed[token.id] = err ~= nil and token.identity or nil
 		if err ~= nil then notify(err) end
 		M.render(session)
+		load_pending(session)
 	end)
+end
+
+load_pending = function(session)
+	if session.loading ~= nil or not valid_win(session.win) then return end
+	while #session.pending > 0 do
+		local pending = table.remove(session.pending, 1)
+		local node = session.nodes[pending.id]
+		if node ~= nil and session.visible[node.id] and not session.closed[node.id]
+			and not node.loaded and node.error == nil
+			and node.snapshot.id == pending.snapshot.id and node.snapshot.generation == pending.snapshot.generation
+			and context.is_current(node.snapshot) then
+			return load(session, node)
+		end
+	end
+end
+
+local function load_on_open(session, node, automatic)
+	if node.request == nil or node.loaded or node.error ~= nil then return end
+	local identity = request_identity(node)
+	if automatic and session.failed[node.id] == identity then return end
+	local loading = session.loading
+	if loading ~= nil and loading.id == node.id and loading.identity == identity then return end
+	for index, pending in ipairs(session.pending) do
+		if pending.id == node.id then
+			session.pending[index] = node
+			if not automatic then load_pending(session) end
+			return
+		end
+	end
+	-- Introspection shares one process slot per source. Keep visible open
+	-- branches in order rather than cancelling an earlier branch's request.
+	table.insert(session.pending, node)
+	if not automatic then load_pending(session) end
+end
+
+load_open = function(session)
+	for _, node in ipairs(session.open_branches) do load_on_open(session, node, true) end
+	load_pending(session)
 end
 
 local function activate(session, node)
@@ -251,6 +317,7 @@ function M.action(action)
 	if action == "left" and (not node.branch or session.closed[node.id]) then
 		return focus_entry(session, node.parent)
 	elseif action == "right" and node.branch and not session.closed[node.id] then
+		if node.request ~= nil and not node.loaded then return load_on_open(session, node) end
 		local child = session.entries[row + 1]
 		if child ~= nil and child.parent == node.id then focus_entry(session, child.id) end
 		return
@@ -259,6 +326,7 @@ function M.action(action)
 		elseif action == "right" then session.closed[node.id] = false
 		else session.closed[node.id] = not session.closed[node.id] end
 		M.render(session)
+		if not session.closed[node.id] then load_on_open(session, node) end
 	elseif action == "open" or action == "right" then
 		activate(session, node)
 	end
@@ -273,7 +341,7 @@ function M.open()
 		return session
 	end
 	if session == nil then
-		session = { tab = tab, closed = {}, entries = {}, nodes = {} }
+		session = { tab = tab, closed = {}, entries = {}, nodes = {}, pending = {}, failed = {} }
 		sessions[tab] = session
 	end
 	local current_buf = vim.api.nvim_get_current_buf()
@@ -336,6 +404,7 @@ function M.close()
 	if session == nil or not valid_win(session.win) then return end
 	local node = session.entries[vim.api.nvim_win_get_cursor(session.win)[1]]
 	session.anchor = node and node.id
+	session.pending = {}
 	if #vim.api.nvim_tabpage_list_wins(session.tab) == 1 then working_window(session) end
 	vim.api.nvim_win_close(session.win, false)
 	session.win = nil
@@ -369,6 +438,7 @@ function M.setup()
 				if session.loading ~= nil and not context.is_current(session.loading.snapshot) then
 					require("dbsh.exec").cancel("introspect", session.loading.snapshot)
 					session.loading = nil
+					session.pending = {}
 				end
 			end
 			refresh()
@@ -394,6 +464,7 @@ function M.setup()
 						if session.loading ~= nil then
 							require("dbsh.exec").cancel("introspect", session.loading.snapshot)
 							session.loading = nil
+							session.pending = {}
 						end
 					end
 				end
