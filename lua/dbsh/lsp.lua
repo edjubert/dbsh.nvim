@@ -400,6 +400,27 @@ local function configure_when_ready(record, snapshot, opts)
 	configure()
 end
 
+-- Resolve only the active managed connection. Callback inputs and results stay
+-- private: neither declared profiles nor public context snapshots are mutated.
+local function resolve_password(snapshot)
+	local callback = snapshot.connection.password
+	if type(callback) ~= "function" then
+		return snapshot
+	end
+	local connection = vim.deepcopy(snapshot.connection)
+	connection.database = effective_database(snapshot)
+	local ok, password = pcall(callback, connection)
+	if not ok then
+		return nil, "managed PgLS password callback failed"
+	end
+	if type(password) ~= "string" or password == "" then
+		return nil, "managed PgLS password callback must return a non-empty string"
+	end
+	local resolved = vim.deepcopy(snapshot)
+	resolved.connection.password = password
+	return resolved
+end
+
 function M.attach_managed(bufnr, snapshot)
 	bufnr = concrete_bufnr(bufnr)
 	local descriptor, connection, opts = managed_target(snapshot)
@@ -413,7 +434,7 @@ function M.attach_managed(bufnr, snapshot)
 		or connection.port <= 0
 		or type(connection.username) ~= "string"
 		or connection.username == ""
-		or type(connection.password) ~= "string"
+		or (type(connection.password) ~= "string" and type(connection.password) ~= "function")
 		or connection.password == ""
 		or type(effective_database(snapshot)) ~= "string"
 		or effective_database(snapshot) == "" then
@@ -425,6 +446,13 @@ function M.attach_managed(bufnr, snapshot)
 		)
 		return
 	end
+
+	local resolved, err = resolve_password(snapshot)
+	if resolved == nil then
+		record_error(key, err, opts, snapshot)
+		return
+	end
+	snapshot = resolved
 
 	local record = state.pool[key]
 	local created = record == nil

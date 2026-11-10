@@ -1,4 +1,4 @@
--- In-memory credential resolution for CLI-backed database connections.
+-- Credential helpers and in-memory resolution for database connections.
 
 local M = {}
 
@@ -41,6 +41,90 @@ local function trim_terminal_newline(value)
 		return value:sub(1, -2)
 	end
 	return value
+end
+
+local function split_pgpass(line)
+	local fields, wildcards, current, escaped, had_escape = {}, {}, {}, false, false
+	for i = 1, #line do
+		local char = line:sub(i, i)
+		if escaped then
+			current[#current + 1] = char
+			escaped = false
+		elseif char == "\\" then
+			escaped = true
+			had_escape = true
+		elseif char == ":" and #fields < 4 then
+			fields[#fields + 1] = table.concat(current)
+			wildcards[#fields] = not had_escape and fields[#fields] == "*"
+			current = {}
+			had_escape = false
+		else
+			current[#current + 1] = char
+		end
+	end
+	fields[#fields + 1] = table.concat(current)
+	return fields, wildcards
+end
+
+--- Read the first matching password from PGPASSFILE or ~/.pgpass.
+--- Returns nil and a sanitized error when no usable entry is available.
+---@param connection table
+---@return string? password
+---@return string? error
+function M.pgpass(connection)
+	if type(connection) ~= "table"
+		or type(connection.host) ~= "string" or connection.host == ""
+		or type(connection.port) ~= "number" or connection.port <= 0
+		or type(connection.database) ~= "string" or connection.database == ""
+		or type(connection.username) ~= "string" or connection.username == "" then
+		return nil, "pgpass requires host, port, database, and username"
+	end
+
+	local path = vim.env.PGPASSFILE
+	if path == nil or path == "" then
+		path = vim.fn.expand("~/.pgpass")
+	end
+	local stat = vim.uv.fs_stat(path)
+	if stat == nil or stat.type ~= "file" then
+		return nil, "pgpass file is missing or unreadable"
+	end
+	-- libpq ignores password files with any group or other permissions on Unix.
+	if vim.fn.has("win32") ~= 1 and stat.mode % 64 ~= 0 then
+		return nil, "pgpass file must not allow group or other access"
+	end
+	local ok, lines = pcall(vim.fn.readfile, path)
+	if not ok then
+		return nil, "pgpass file is missing or unreadable"
+	end
+
+	local expected = { connection.host, tostring(connection.port), connection.database, connection.username }
+	for _, line in ipairs(lines) do
+		if not line:match("^%s*#") then
+			local fields, wildcards = split_pgpass(line)
+			local matches = #fields == 5
+			for i = 1, 4 do
+				if not wildcards[i] and fields[i] ~= expected[i] then
+					matches = false
+					break
+				end
+			end
+			if matches then
+				if fields[5] == "" then
+					return nil, "matching pgpass entry has an empty password"
+				end
+				return fields[5]
+			end
+		end
+	end
+	return nil, "no matching entry in pgpass file"
+end
+
+--- Build a macOS Keychain password command without executing it.
+---@param service string
+---@return string[]
+function M.keychain(service)
+	assert(type(service) == "string" and service ~= "", "keychain service must be a non-empty string")
+	return { "security", "find-generic-password", "-s", service, "-w" }
 end
 
 function M.invalidate(key)

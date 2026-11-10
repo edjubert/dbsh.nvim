@@ -3,10 +3,12 @@ local eq, expect_match = helpers.eq, helpers.expect_match
 
 local config = require("dbsh.config")
 local context = require("dbsh.context")
+local credentials = require("dbsh.credentials")
 local lsp = require("dbsh.lsp")
 
 local originals
 local active_snapshot
+local pgpassfile
 
 local function fake_client(id, name)
 	local client = {
@@ -94,7 +96,10 @@ local T = MiniTest.new_set({
 				sync_external = lsp.sync_external,
 				reconcile_managed = lsp.reconcile_managed,
 				notify = vim.notify,
+				pgpassfile = vim.env.PGPASSFILE,
 			}
+			pgpassfile = vim.fn.tempname()
+			vim.env.PGPASSFILE = pgpassfile
 			lsp._warned = { env = false, command = false, failures = {} }
 			lsp.setup()
 			lsp.detach_client = function() return true end
@@ -115,6 +120,8 @@ local T = MiniTest.new_set({
 			lsp.sync_external = originals.sync_external
 			lsp.reconcile_managed = originals.reconcile_managed
 			vim.notify = originals.notify
+			vim.env.PGPASSFILE = originals.pgpassfile
+			vim.fn.delete(pgpassfile)
 			vim.env.PGDATABASE = nil
 			lsp.setup()
 		end,
@@ -240,6 +247,117 @@ T["starts one managed client per key and sends official configuration overrides"
 	eq(requests.params.overrides.db.connectionString, nil)
 	eq(requests.params.overrides.db.role, nil)
 	eq(vim.inspect(lsp.status()):find("never%-send"), nil)
+	vim.api.nvim_buf_delete(buf, { force = true })
+end
+
+T["resolves password callbacks lazily with the effective database and an isolated connection"] = function()
+	local calls = 0
+	local callback = function(connection)
+		calls = calls + 1
+		eq(connection.host, "localhost")
+		eq(connection.port, 5432)
+		eq(connection.username, "dev")
+		eq(connection.database, "analytics")
+		connection.host = "mutated-by-callback"
+		connection.database = "mutated-by-callback"
+		return "resolved-password"
+	end
+	local buf = sql_buf()
+	local snapshot = setup_with({ mode = "managed" }, { password = callback })
+	snapshot.bufnr = buf
+	snapshot.project_root = "/work/project"
+	snapshot.levels.database = "analytics"
+	config.options().connections.unused = { password = function() error("unused callback") end }
+	eq(calls, 0)
+	local client = fake_client(42)
+	local started
+	lsp.start_client = function(client_config)
+		started = client_config
+		return client
+	end
+	lsp.attach_client = function() return true end
+
+	eq(lsp.attach_managed(buf, snapshot), 42)
+
+	eq(calls, 1)
+	eq(client.requested[1].params.overrides.db.database, "analytics")
+	eq(client.requested[1].params.overrides.db.host, "localhost")
+	eq(client.requested[1].params.overrides.db.password, "resolved-password")
+	eq(config.options().connections.local_db.password, callback)
+	eq(snapshot.connection.password, callback)
+	eq(snapshot.connection.database, "postgres")
+	eq(vim.inspect(started):find("resolved-password", 1, true), nil)
+	eq(vim.inspect(lsp.status()):find("resolved-password", 1, true), nil)
+	vim.api.nvim_buf_delete(buf, { force = true })
+end
+
+T["pgpass callbacks use the selected database and leave other profiles usable on a miss"] = function()
+	vim.fn.writefile({
+		"localhost:5432:postgres:dev:default-password",
+		"localhost:5432:analytics:dev:selected-password",
+	}, pgpassfile)
+	assert(vim.uv.fs_chmod(pgpassfile, 384))
+	local buf = sql_buf()
+	local snapshot = setup_with({ mode = "managed" }, { password = credentials.pgpass })
+	snapshot.bufnr = buf
+	snapshot.project_root = "/work/project"
+	snapshot.levels.database = "missing"
+	local notices = {}
+	vim.notify = function(message) notices[#notices + 1] = message end
+	local starts = 0
+	local client = fake_client(42)
+	lsp.start_client = function()
+		starts = starts + 1
+		return client
+	end
+	lsp.attach_client = function() return true end
+
+	eq(lsp.attach_managed(buf, snapshot), nil)
+	eq(starts, 0)
+	eq(#notices, 1)
+	eq(config.options().connections.local_db.password, credentials.pgpass)
+	eq(vim.inspect(lsp.status()):find("default-password", 1, true), nil)
+
+	snapshot.levels.database = "analytics"
+	eq(lsp.attach_managed(buf, snapshot), 42)
+	eq(starts, 1)
+	eq(client.requested[1].params.overrides.db.password, "selected-password")
+	eq(client.requested[1].params.overrides.db.database, "analytics")
+	vim.api.nvim_buf_delete(buf, { force = true })
+end
+
+T["sanitizes callback exceptions and rejects missing or non-string passwords"] = function()
+	local buf = sql_buf()
+	local snapshot = managed_snapshot(buf)
+	local notices = {}
+	vim.notify = function(message) notices[#notices + 1] = message end
+	lsp.start_client = function() error("must not start without a password") end
+	for _, callback in ipairs({
+		function() error("secret-from-callback") end,
+		function() return nil, "secret-from-callback" end,
+		function() return "" end,
+		function() return { password = "secret-from-callback" } end,
+	}) do
+		snapshot.connection.password = callback
+		eq(lsp.attach_managed(buf, snapshot), nil)
+		eq(vim.inspect(lsp.status()):find("secret-from-callback", 1, true), nil)
+		eq(vim.inspect(notices):find("secret-from-callback", 1, true), nil)
+	end
+	eq(#notices, 1)
+	vim.api.nvim_buf_delete(buf, { force = true })
+end
+
+T["does not invoke password callbacks in off or external mode"] = function()
+	local buf = sql_buf()
+	for _, mode in ipairs({ "off", "external" }) do
+		local snapshot = setup_with({ mode = mode }, {
+			password = function() error("callback should only run for managed PgLS") end,
+		})
+		snapshot.bufnr = buf
+		lsp._clients = function() return {} end
+		lsp.sync_external(snapshot)
+		eq(lsp.attach_managed(buf, snapshot), nil)
+	end
 	vim.api.nvim_buf_delete(buf, { force = true })
 end
 

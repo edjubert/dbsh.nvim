@@ -90,6 +90,30 @@ T["passes PGCONNECT_TIMEOUT and never PGPASSWORD"] = function()
 	eq(captured_opts.env.PGPASSWORD, nil)
 end
 
+T["PostgreSQL queries leave password callbacks to managed PgLS"] = function()
+	config.options().connections.local_db.password = function()
+		error("SQL execution must delegate authentication to psql")
+	end
+	context.setup()
+	assert(context.set_level(0, "database", "analytics", "test"))
+	local argv, environment, got
+	exec.runner = function(command, opts, callback)
+		argv, environment = command, opts.env
+		callback({ code = 0, stdout = "ok", stderr = "" })
+		return { kill = function() end }
+	end
+
+	exec.run("SELECT 1;", {}, function(code, stdout)
+		got = { code = code, stdout = stdout }
+	end)
+
+	eq(vim.wait(200, function() return got ~= nil end), true)
+	eq(got, { code = 0, stdout = "ok" })
+	eq(vim.tbl_contains(argv, "-w"), true)
+	eq(vim.tbl_contains(argv, "analytics"), true)
+	eq(environment.PGPASSWORD, nil)
+end
+
 T["executes normally when the backend has no prepare hook"] = function()
 	postgres.prepare = nil
 	local captured_runtime

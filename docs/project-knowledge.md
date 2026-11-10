@@ -270,6 +270,17 @@ status, notification, log, or persisted configuration. Pool strategies are
 `immediate`, `idle`, and `session`. Context reconciliation detaches only
 managed clients and resets only their diagnostic namespace.
 
+PostgreSQL `password` is either a string or a synchronous callback. Managed
+attachment resolves callbacks with an isolated copy of the effective connection
+and puts the returned password only into a private snapshot for the session RPC.
+Setup and off/external modes never resolve them. Callback errors and invalid
+return values are sanitized before entering status or notifications.
+`credentials.pgpass(connection)` reads `PGPASSFILE` or `~/.pgpass` using libpq's
+first-match, wildcard, escape, and Unix permission rules.
+`credentials.keychain(service)` constructs a fresh macOS `security` argv array
+for existing Keychain entries; backend preparation executes it through the
+existing asynchronous credential cache.
+
 `DbLspStatus` displays only the active context's public state. Managed mode
 requires PgLS 0.26.0 or newer (tested with 0.28.1) and uses its official
 persistent-override layer. No patched binary is required.

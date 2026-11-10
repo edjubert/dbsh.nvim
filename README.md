@@ -235,8 +235,8 @@ require("dbsh").setup({
 
 There is deliberately no password field required for SQL execution. `psql`
 always uses `~/.pgpass`. Managed PgLS alone needs an in-memory `password` on
-its PostgreSQL profile, usually sourced from an environment variable as shown
-below; dbsh never passes that value to `psql` or persists it.
+its PostgreSQL profile, supplied as a string or a password callback; dbsh never
+passes that value to `psql` or persists it.
 
 ## Authentication
 
@@ -257,6 +257,47 @@ chmod 600 ~/.pgpass
 PostgreSQL silently ignores a `.pgpass` with looser permissions. The symptom is an
 unexpected password prompt, and it is the single most common setup mistake.
 
+### Credential helpers
+
+`require("dbsh.credentials")` provides reusable helpers:
+
+| Helper | Result |
+|---|---|
+| `credentials.pgpass(connection)` | The first password matching `host`, `port`, `database`, and `username`, or `nil, error`. |
+| `credentials.keychain(service)` | A new argv array for `security find-generic-password -s <service> -w`. |
+
+`pgpass` reads `PGPASSFILE` when set, otherwise `~/.pgpass`. It supports wildcard
+fields and escaped colons and backslashes, preserves file order, and ignores
+files with group or other permissions on Unix, just like libpq. Missing,
+unreadable, or unmatched files return a sanitized error.
+
+Assign the function itself to a PostgreSQL profile for managed PgLS:
+
+```lua
+local credentials = require("dbsh.credentials")
+
+connections = {
+	local_db = {
+		host = "localhost",
+		port = 5432,
+		database = "app",
+		username = "reader",
+		password = credentials.pgpass,
+	},
+}
+```
+
+dbsh invokes the callback with an isolated copy of the effective connection
+when a managed PgLS client is attached, so changing the selected database also
+changes the `.pgpass` lookup. Setup, SQL execution, and off/external LSP modes
+do not invoke password callbacks. A missing password affects that managed
+context only; other connections and SQL execution remain available.
+
+`keychain` constructs the command without executing it or creating a Keychain
+entry. The service name is a user-chosen label for an existing generic password
+item. Snowflake and password-authenticated MongoDB profiles can reuse it;
+other platforms can continue supplying their own `password_command` argv.
+
 ### Snowflake
 
 Snowflake profiles use the `snow` CLI only. They are structured profiles: do not
@@ -268,6 +309,8 @@ implemented for now; the maintainer is open to adding other authentication
 methods.
 
 ```lua
+local credentials = require("dbsh.credentials")
+
 require("dbsh").setup({
 	connections = {
 		warehouse = {
@@ -280,13 +323,7 @@ require("dbsh").setup({
 			warehouse = "<warehouse>",
 			database = "<database>",
 			schema = "<optional-schema>",
-			password_command = {
-				"security",
-				"find-generic-password",
-				"-s",
-				"dbsh.snowflake.<profile>",
-				"-w",
-			},
+			password_command = credentials.keychain("dbsh.snowflake.<profile>"),
 		},
 	},
 	default = "warehouse",
@@ -314,6 +351,8 @@ guardrail; Snowflake role permissions remain the security authority. Run
 The MongoDB backend drives `mongosh`. Queries are JavaScript, not SQL.
 
 ```lua
+local credentials = require("dbsh.credentials")
+
 connections = {
 	atlas = {
 		type = "mongo",
@@ -322,7 +361,7 @@ connections = {
 		username = "<username>",
 		database = "<database>",
 		proxy = { host = "127.0.0.1", port = 1080 },
-		password_command = { "security", "find-generic-password", "-s", "dbsh.mongo", "-w" },
+		password_command = credentials.keychain("dbsh.mongo"),
 	},
 }
 ```
@@ -387,6 +426,8 @@ validates SQL against a real database: it will tell you a column does not exist
 before you run the query. dbsh supports three explicit modes:
 
 ```lua
+local credentials = require("dbsh.credentials")
+
 require("dbsh").setup({
 	connections = {
 		local_db = {
@@ -394,7 +435,7 @@ require("dbsh").setup({
 			port = 5432,
 			database = "app",
 			username = "app",
-			password = vim.env.PGAPP_PASSWORD,
+			password = credentials.pgpass,
 			search_path = { "extensions", "public" },
 		},
 	},
@@ -444,6 +485,12 @@ For ordinary file buffers, the project root is discovered from the nearest
 scratchpad project root keeps precedence over this discovery.
 Changing one buffer's context detaches only that buffer from its stale client;
 other buffers retain their references.
+
+`password` accepts a non-empty string (including an environment variable) or a
+synchronous `function(connection)` returning one. Callbacks receive the effective
+database and cannot mutate the declared profile or context through their input.
+Exceptions, missing passwords, and invalid return values produce sanitized
+per-context errors; callback error text is never included in status or notices.
 
 `immediate` stops a client when its final buffer detaches. `idle` waits for
 `idle_timeout_ms` and cancels that timer if a buffer reattaches. `session`
