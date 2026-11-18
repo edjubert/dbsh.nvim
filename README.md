@@ -238,6 +238,38 @@ always uses `~/.pgpass`. Managed PgLS alone needs an in-memory `password` on
 its PostgreSQL profile, supplied as a string or a password callback; dbsh never
 passes that value to `psql` or persists it.
 
+### Keeping connections out of version control
+
+`connections` names hosts, users, and AWS profiles. Put them in a file your
+configuration can require, and keep that file out of the repository:
+
+```lua
+-- ~/.config/nvim/lua/config/dbsh-connections.lua
+local credentials = require("dbsh.credentials")
+
+return {
+	connections = {
+		local_db = {
+			host = "127.0.0.1",
+			port = 5432,
+			database = "app",
+			username = "app",
+			password = credentials.pgpass,
+		},
+	},
+	default = "local_db",
+}
+```
+
+```lua
+-- init.lua
+require("dbsh").setup(require("config.dbsh-connections"))
+```
+
+[`examples/dbsh-connections.example.lua`](examples/dbsh-connections.example.lua)
+is the full template: PostgreSQL, Snowflake, and both MongoDB authentication
+modes. Copy it, fill in the placeholders, and add the copy to `.gitignore`.
+
 ## Authentication
 
 `psql` resolves passwords from `~/.pgpass`. The plugin passes `-w`, so it never
@@ -297,6 +329,9 @@ context only; other connections and SQL execution remain available.
 entry. The service name is a user-chosen label for an existing generic password
 item. Snowflake and password-authenticated MongoDB profiles can reuse it;
 other platforms can continue supplying their own `password_command` argv.
+
+[`examples/dbsh-connections.example.lua`](examples/dbsh-connections.example.lua)
+assembles both helpers into a complete connections file.
 
 ### Snowflake
 
